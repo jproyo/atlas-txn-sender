@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::{
@@ -27,16 +26,15 @@ impl TransactionBundleExecutor {
         }
     }
 
-    pub async fn execute_bundle(&self, transactions: Vec<TransactionData>) -> Vec<String> {
+    pub async fn execute_bundle(
+        &self,
+        transactions: Vec<TransactionData>,
+    ) -> anyhow::Result<Vec<String>> {
         let mut signatures = Vec::new();
-        let bundle_lock = Arc::new(Mutex::new(()));
 
         for transaction in transactions {
             let signature = transaction.versioned_transaction.signatures[0].to_string();
             signatures.push(signature.clone());
-
-            // Acquire lock to ensure serial execution
-            let _lock = bundle_lock.lock().await;
 
             // Send transaction
             self.txn_sender.send_transaction(transaction.clone());
@@ -49,11 +47,14 @@ impl TransactionBundleExecutor {
                 }
                 None => {
                     error!("Transaction {} failed or timed out", signature);
-                    break; // Stop processing remaining transactions
+                    return Err(anyhow::anyhow!(
+                        "Error processing transaction {}",
+                        signature
+                    ));
                 }
             }
         }
 
-        signatures
+        Ok(signatures)
     }
 }

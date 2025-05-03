@@ -1,5 +1,6 @@
 use atlas_txn_sender::metrics::new_metrics_client;
 use atlas_txn_sender::rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
+use atlas_txn_sender::transaction_bundle::TransactionBundleExecutor;
 use atlas_txn_sender::{grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl};
 use atlas_txn_sender::{transaction_store::TransactionStoreImpl, txn_sender::TxnSenderImpl};
 use figment::{providers::Env, Figment};
@@ -111,11 +112,16 @@ async fn main() -> anyhow::Result<()> {
         env.max_retry_queue_size,
     ));
     let max_txn_send_retries = env.max_txn_send_retries.unwrap_or(5);
+    let bundle_executor = Arc::new(TransactionBundleExecutor::new(
+        txn_sender.clone(),
+        transaction_store.clone(),
+        solana_rpc.clone(),
+    ));
     let atlas_txn_sender = AtlasTxnSenderImpl::new(
         txn_sender,
         transaction_store,
-        solana_rpc.clone(),
         max_txn_send_retries,
+        bundle_executor,
     );
     let handle = server.start(atlas_txn_sender.into_rpc());
     handle.stopped().await;

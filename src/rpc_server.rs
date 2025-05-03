@@ -10,12 +10,10 @@ use serde::Deserialize;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_transaction_status::UiTransactionEncoding;
-use tokio::sync::Mutex;
-use tracing::{error, info};
 
 use crate::{
-    errors::invalid_request,
-    solana_rpc::SolanaRpc,
+    errors::{invalid_request, AtlasTxnSenderError},
+    transaction_bundle::TransactionBundleExecutor,
     transaction_store::{TransactionData, TransactionStore},
     txn_sender::TxnSender,
     vendor::solana_rpc::decode_and_deserialize,
@@ -27,7 +25,7 @@ pub struct RequestMetadata {
     pub api_key: String,
 }
 
-#[rpc(server, namespace = "atlas")]
+#[rpc(server)]
 pub trait AtlasTxnSender {
     #[method(name = "health")]
     async fn health(&self) -> String;
@@ -50,24 +48,22 @@ pub trait AtlasTxnSender {
 pub struct AtlasTxnSenderImpl {
     txn_sender: Arc<dyn TxnSender>,
     transaction_store: Arc<dyn TransactionStore>,
-    solana_rpc: Arc<dyn SolanaRpc>,
     max_txn_send_retries: usize,
-    bundle_lock: Arc<Mutex<()>>,
+    bundle_executor: Arc<TransactionBundleExecutor>,
 }
 
 impl AtlasTxnSenderImpl {
     pub fn new(
         txn_sender: Arc<dyn TxnSender>,
         transaction_store: Arc<dyn TransactionStore>,
-        solana_rpc: Arc<dyn SolanaRpc>,
         max_txn_send_retries: usize,
+        bundle_executor: Arc<TransactionBundleExecutor>,
     ) -> Self {
         Self {
             txn_sender,
             max_txn_send_retries,
             transaction_store,
-            solana_rpc,
-            bundle_lock: Arc::new(Mutex::new(())),
+            bundle_executor,
         }
     }
 }
@@ -154,7 +150,6 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         })?;
 
         let mut transactions = Vec::new();
-        let mut signatures = Vec::new();
 
         // Decode and validate all transactions first
         for txn in txns {
@@ -167,13 +162,6 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
                         return Err(invalid_request(&e.to_string()));
                     }
                 };
-
-            let signature = versioned_transaction.signatures[0].to_string();
-            if self.transaction_store.has_signature(&signature) {
-                statsd_count!("duplicate_transaction", 1, "api_key" => &api_key);
-                signatures.push(signature);
-                continue;
-            }
 
             let transaction = TransactionData {
                 wire_transaction,
@@ -188,27 +176,13 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
             };
 
             transactions.push(transaction);
-            signatures.push(signature);
         }
 
-        // Execute transactions serially with a lock to ensure no other bundles interfere
-        let _lock = self.bundle_lock.lock().await;
-
-        for (i, transaction) in transactions.into_iter().enumerate() {
-            let signature = signatures[i].clone();
-            self.txn_sender.send_transaction(transaction);
-
-            // Wait for confirmation
-            match self.solana_rpc.confirm_transaction(signature.clone()).await {
-                Some(_) => {
-                    info!("Transaction {} confirmed successfully", signature);
-                }
-                None => {
-                    error!("Transaction {} failed or timed out", signature);
-                    break; // Stop processing remaining transactions
-                }
-            }
-        }
+        let signatures = self
+            .bundle_executor
+            .execute_bundle(transactions)
+            .await
+            .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
         statsd_time!(
             "send_transaction_bundle_time",
