@@ -9,7 +9,7 @@ use jsonrpsee::{
 use serde::Deserialize;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_sdk::transaction::VersionedTransaction;
-use solana_transaction_status::UiTransactionEncoding;
+use solana_transaction_status::{TransactionBinaryEncoding, UiTransactionEncoding};
 
 use crate::{
     errors::{invalid_request, AtlasTxnSenderError},
@@ -68,6 +68,40 @@ impl AtlasTxnSenderImpl {
     }
 }
 
+impl AtlasTxnSenderImpl {
+    fn create_transaction_data(
+        &self,
+        params: RpcSendTransactionConfig,
+        request_metadata: Option<RequestMetadata>,
+        binary_encoding: TransactionBinaryEncoding,
+        tx_raw: String,
+    ) -> RpcResult<TransactionData> {
+        let (wire_transaction, versioned_transaction) =
+            match decode_and_deserialize::<VersionedTransaction>(tx_raw, binary_encoding) {
+                Ok((wire_transaction, versioned_transaction)) => {
+                    (wire_transaction, versioned_transaction)
+                }
+                Err(e) => {
+                    return Err(invalid_request(&e.to_string()));
+                }
+            };
+
+        let transaction = TransactionData {
+            wire_transaction,
+            versioned_transaction,
+            sent_at: Instant::now(),
+            retry_count: 0,
+            max_retries: std::cmp::min(
+                self.max_txn_send_retries,
+                params.max_retries.unwrap_or(self.max_txn_send_retries),
+            ),
+            request_metadata: request_metadata.clone(),
+        };
+
+        Ok(transaction)
+    }
+}
+
 #[async_trait]
 impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
     async fn health(&self) -> String {
@@ -80,7 +114,6 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<String> {
-        let sent_at = Instant::now();
         let api_key = request_metadata
             .clone()
             .map(|m| m.api_key)
@@ -94,31 +127,13 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
                 "unsupported encoding: {encoding}. Supported encodings: base58, base64"
             ))
         })?;
-        let (wire_transaction, versioned_transaction) =
-            match decode_and_deserialize::<VersionedTransaction>(txn, binary_encoding) {
-                Ok((wire_transaction, versioned_transaction)) => {
-                    (wire_transaction, versioned_transaction)
-                }
-                Err(e) => {
-                    return Err(invalid_request(&e.to_string()));
-                }
-            };
-        let signature = versioned_transaction.signatures[0].to_string();
+        let transaction =
+            self.create_transaction_data(params, request_metadata, binary_encoding, txn)?;
+        let signature = transaction.versioned_transaction.signatures[0].to_string();
         if self.transaction_store.has_signature(&signature) {
             statsd_count!("duplicate_transaction", 1, "api_key" => &api_key);
             return Ok(signature);
         }
-        let transaction = TransactionData {
-            wire_transaction,
-            versioned_transaction,
-            sent_at,
-            retry_count: 0,
-            max_retries: std::cmp::min(
-                self.max_txn_send_retries,
-                params.max_retries.unwrap_or(self.max_txn_send_retries),
-            ),
-            request_metadata,
-        };
         self.txn_sender.send_transaction(transaction);
         statsd_time!(
             "send_transaction_time",
@@ -153,28 +168,12 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
 
         // Decode and validate all transactions first
         for txn in txns {
-            let (wire_transaction, versioned_transaction) =
-                match decode_and_deserialize::<VersionedTransaction>(txn, binary_encoding) {
-                    Ok((wire_transaction, versioned_transaction)) => {
-                        (wire_transaction, versioned_transaction)
-                    }
-                    Err(e) => {
-                        return Err(invalid_request(&e.to_string()));
-                    }
-                };
-
-            let transaction = TransactionData {
-                wire_transaction,
-                versioned_transaction,
-                sent_at,
-                retry_count: 0,
-                max_retries: std::cmp::min(
-                    self.max_txn_send_retries,
-                    params.max_retries.unwrap_or(self.max_txn_send_retries),
-                ),
-                request_metadata: request_metadata.clone(),
-            };
-
+            let transaction = self.create_transaction_data(
+                params,
+                request_metadata.clone(),
+                binary_encoding,
+                txn,
+            )?;
             transactions.push(transaction);
         }
 
