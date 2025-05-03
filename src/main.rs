@@ -3,6 +3,7 @@ use atlas_txn_sender::rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
 use atlas_txn_sender::transaction_bundle::TransactionBundleExecutor;
 use atlas_txn_sender::{grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl};
 use atlas_txn_sender::{transaction_store::TransactionStoreImpl, txn_sender::TxnSenderImpl};
+use dashmap::DashMap;
 use figment::{providers::Env, Figment};
 use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
 use serde::Deserialize;
@@ -88,9 +89,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let transaction_store = Arc::new(TransactionStoreImpl::new());
+    let blockhash_record = Arc::new(DashMap::new());
     let solana_rpc = Arc::new(GrpcGeyserImpl::new(
         env.grpc_url.clone().unwrap(),
         env.x_token.clone(),
+        Some(blockhash_record.clone()),
     ));
     let rpc_client = Arc::new(RpcClient::new(env.rpc_url.unwrap()));
     let num_leaders = env.num_leaders.unwrap_or(2);
@@ -116,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         txn_sender.clone(),
         transaction_store.clone(),
         solana_rpc.clone(),
+        blockhash_record,
     ));
     let atlas_txn_sender = AtlasTxnSenderImpl::new(
         txn_sender,

@@ -179,7 +179,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
 
         let signatures = self
             .bundle_executor
-            .execute_bundle(transactions)
+            .execute_bundle(transactions, &api_key)
             .await
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 

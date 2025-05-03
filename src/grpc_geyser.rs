@@ -8,8 +8,9 @@ use futures::sink::SinkExt;
 use futures::StreamExt;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use solana_sdk::clock::UnixTimestamp;
-use solana_sdk::signature::Signature;
+use solana_sdk::clock::{Slot, UnixTimestamp};
+use solana_sdk::hash::Hash;
+use solana_sdk::signature::{Signature, SIGNATURE_BYTES};
 use tokio::time::sleep;
 use tonic::async_trait;
 use tracing::error;
@@ -27,15 +28,21 @@ pub struct GrpcGeyserImpl {
     auth_header: Option<String>,
     cur_slot: Arc<AtomicU64>,
     signature_cache: Arc<DashMap<String, (UnixTimestamp, Instant)>>,
+    recent_blockhash_cache: Option<Arc<dashmap::DashMap<Hash, Slot>>>,
 }
 
 impl GrpcGeyserImpl {
-    pub fn new(endpoint: String, auth_header: Option<String>) -> Self {
+    pub fn new(
+        endpoint: String,
+        auth_header: Option<String>,
+        recent_blockhash_cache: Option<Arc<dashmap::DashMap<Hash, Slot>>>,
+    ) -> Self {
         let grpc_geyser = Self {
             endpoint,
             auth_header,
             cur_slot: Arc::new(AtomicU64::new(0)),
             signature_cache: Arc::new(DashMap::new()),
+            recent_blockhash_cache,
         };
         // polling with processed commitment to get latest leaders
         grpc_geyser.poll_slots();
@@ -60,6 +67,7 @@ impl GrpcGeyserImpl {
         let endpoint = self.endpoint.clone();
         let auth_header = self.auth_header.clone();
         let signature_cache = self.signature_cache.clone();
+        let bundle_executor = self.recent_blockhash_cache.clone();
         tokio::spawn(async move {
             loop {
                 let mut grpc_tx;
@@ -93,10 +101,20 @@ impl GrpcGeyserImpl {
                         Ok(message) => match message.update_oneof {
                             Some(UpdateOneof::Block(block)) => {
                                 let block_time = block.block_time.unwrap().timestamp;
+                                let blockhash = Hash::new(block.blockhash.as_bytes());
+                                let slot = block.slot;
+
+                                // Update blockhash cache if bundle executor exists
+                                if let Some(executor) = &bundle_executor {
+                                    executor.insert(blockhash, slot);
+                                }
+
                                 for transaction in block.transactions {
-                                    let signature = Signature::try_from(transaction.signature)
-                                        .unwrap()
-                                        .to_string();
+                                    let mut signature_bytes: [u8; SIGNATURE_BYTES] =
+                                        [0; SIGNATURE_BYTES];
+                                    signature_bytes
+                                        .copy_from_slice(transaction.signature.as_slice());
+                                    let signature = Signature::from(signature_bytes).to_string();
                                     signature_cache.insert(signature, (block_time, Instant::now()));
                                 }
                             }
