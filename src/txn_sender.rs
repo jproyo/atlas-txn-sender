@@ -78,8 +78,8 @@ impl TxnSenderImpl {
         let transaction_store = self.transaction_store.clone();
         let connection_cache = self.connection_cache.clone();
         let txn_sender_runtime = self.txn_sender_runtime.clone();
-        let txn_send_retry_interval_seconds = self.txn_send_retry_interval_seconds.clone();
-        let max_retry_queue_size = self.max_retry_queue_size.clone();
+        let txn_send_retry_interval_seconds = self.txn_send_retry_interval_seconds;
+        let max_retry_queue_size = self.max_retry_queue_size;
         tokio::spawn(async move {
             loop {
                 let mut transactions_reached_max_retries = vec![];
@@ -134,8 +134,7 @@ impl TxnSenderImpl {
                         txn_sender_runtime.spawn(async move {
                         // retry unless its a timeout
                         for i in 0..SEND_TXN_RETRIES {
-                            let conn = connection_cache 
-                                .get_nonblocking_connection(&leader.tpu_quic.unwrap());
+                            let conn = connection_cache.get_nonblocking_connection(&leader.tpu_quic.unwrap());
                             if let Ok(result) = timeout(MAX_TIMEOUT_SEND_DATA_BATCH, conn.send_data(&wire_transaction)).await {
                                 if let Err(e) = result {
                                     if i == SEND_TXN_RETRIES-1 {
@@ -175,7 +174,7 @@ impl TxnSenderImpl {
     }
 
     fn track_transaction(&self, transaction_data: &TransactionData) {
-        let sent_at = transaction_data.sent_at.clone();
+        let sent_at = transaction_data.sent_at;
         let signature = get_signature(transaction_data);
         if signature.is_none() {
             return;
@@ -206,12 +205,12 @@ impl TxnSenderImpl {
                 max_retries = Some(transaction_data.max_retries as i32);
             }
 
-            let retries_tag = bin_counter_to_tag(retries, &RETRY_COUNT_BINS.to_vec());
-            let max_retries_tag: String = bin_counter_to_tag(max_retries, &MAX_RETRIES_BINS.to_vec());
+            let retries_tag = bin_counter_to_tag(retries, RETRY_COUNT_BINS.as_ref());
+            let max_retries_tag: String = bin_counter_to_tag(max_retries, MAX_RETRIES_BINS.as_ref());
 
             // Collect metrics
             // We separate the retry metrics to reduce the cardinality with API key and price.
-            let landed = if let Some(_) = confirmed_at {
+            let landed = if confirmed_at.is_some() {
                 statsd_count!("transactions_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_landed_by_key", 1, "api_key" => &api_key);
                 statsd_time!("transaction_land_time", sent_at.elapsed(), "api_key" => &api_key, "priority_fees_enabled" => &priority_fees_enabled);
@@ -250,7 +249,8 @@ pub fn compute_priority_details(transaction: &VersionedTransaction) -> PriorityD
             Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
                 cu_limit = compute_unit_limit.min(MAX_COMPUTE_UNIT_LIMIT);
             }
-            _ => {}
+            Ok(_) => {}
+            Err(_) => {}
         }
         (
             transaction
@@ -327,7 +327,7 @@ impl TxnSender for TxnSenderImpl {
     }
 }
 
-fn bin_counter_to_tag(counter: Option<i32>, bins: &Vec<i32>) -> String {
+fn bin_counter_to_tag(counter: Option<i32>, bins: &[i32]) -> String {
     if counter.is_none() {
         return "none".to_string();
     }

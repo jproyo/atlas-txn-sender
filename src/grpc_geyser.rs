@@ -94,8 +94,9 @@ impl GrpcGeyserImpl {
                             Some(UpdateOneof::Block(block)) => {
                                 let block_time = block.block_time.unwrap().timestamp;
                                 for transaction in block.transactions {
-                                    let signature =
-                                        Signature::new(&transaction.signature).to_string();
+                                    let signature = Signature::try_from(transaction.signature)
+                                        .unwrap()
+                                        .to_string();
                                     signature_cache.insert(signature, (block_time, Instant::now()));
                                 }
                             }
@@ -202,7 +203,7 @@ impl SolanaRpc for GrpcGeyserImpl {
         // in practice if a tx doesn't land in less than 60 seconds it's probably not going to land
         while start.elapsed() < Duration::from_secs(60) {
             if let Some(block_time) = self.signature_cache.get(&signature) {
-                return Some(block_time.0.clone());
+                return Some(block_time.0);
             }
             sleep(Duration::from_millis(10)).await;
         }

@@ -31,10 +31,15 @@ pub struct TransactionStoreImpl {
 
 impl TransactionStoreImpl {
     pub fn new() -> Self {
-        let transaction_store = Self {
+        Self {
             transactions: Arc::new(DashMap::new()),
-        };
-        transaction_store
+        }
+    }
+}
+
+impl Default for TransactionStoreImpl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -68,7 +73,7 @@ impl TransactionStore for TransactionStoreImpl {
         let start = Instant::now();
         let transaction = self.transactions.remove(&signature);
         statsd_time!("remove_signature_time", start.elapsed());
-        transaction.map_or(None, |t| Some(t.1))
+        transaction.map(|t| t.1)
     }
     fn get_transactions(&self) -> Arc<DashMap<String, TransactionData>> {
         self.transactions.clone()
@@ -79,6 +84,6 @@ pub fn get_signature(transaction: &TransactionData) -> Option<String> {
     transaction
         .versioned_transaction
         .signatures
-        .get(0)
+        .first()
         .map(|s| s.to_string())
 }
