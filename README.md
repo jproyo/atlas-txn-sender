@@ -58,3 +58,47 @@ Then you can run the following command to deploy the service
 ```
 ansible-playbook -i ansible/inventory/hosts.yml ansible/deploy_atlas_txn_sender.yml
 ```
+
+## Running the Example
+
+To run the complete example using the Solana testnet, follow these steps:
+
+1. Start the Atlas Transaction Sender service:
+```bash
+X_TOKEN=YOUR_GRPC_STREAM_API_KEY RPC_URL=https://api.devnet.solana.com GRPC_URL=YOUR_STREAM_GRPC_URL cargo run --release
+```
+
+2. In another terminal, run the example commands in sequence:
+```bash
+# Create accounts
+cargo run --bin send_bundle -- \
+    --solana-rpc-url https://api.devnet.solana.com \
+    --accounts-dir my_accounts \
+    create-accounts \
+    --count 2
+
+# Airdrop SOL to the first account
+cargo run --bin send_bundle -- \
+    --solana-rpc-url https://api.devnet.solana.com \
+    --accounts-dir my_accounts \
+    airdrop \
+    -f my_accounts/account_0.json \
+    -a 1000000000
+
+# Send a bundle of transactions
+cargo run --bin send_bundle -- \
+    --solana-rpc-url https://api.devnet.solana.com \
+    --accounts-dir my_accounts \
+    send-bundle \
+    -u http://localhost:4040 \
+    -k YOUR_API_KEY \
+    -f my_accounts/account_0.json \
+    -t my_accounts/account_1.json \
+    -c 3 \
+    -a 1000000
+```
+
+Note: 
+- Replace `YOUR_API_KEY` with your actual API key for the Atlas Transaction Sender service
+- The testnet airdrop faucet has rate limits, so you may need to wait between airdrop requests
+- You can also use other public RPC endpoints for the devnet

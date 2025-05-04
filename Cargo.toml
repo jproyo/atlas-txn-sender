@@ -2,6 +2,7 @@
 name = "atlas_txn_sender"
 version = "0.1.0"
 edition = "2021"
+default-run = "main"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -44,6 +45,8 @@ futures-channel = "0.3.30"
 futures-sink = "0.3.30"
 rand = "0.8.5"
 indexmap = "2.2.5"
+clap = { version = "4.4.18", features = ["derive"] }
+bs58 = "0.5.0"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

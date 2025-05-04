@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -10,10 +11,10 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use solana_sdk::clock::{Slot, UnixTimestamp};
 use solana_sdk::hash::Hash;
-use solana_sdk::signature::{Signature, SIGNATURE_BYTES};
+use solana_sdk::signature::Signature;
 use tokio::time::sleep;
 use tonic::async_trait;
-use tracing::error;
+use tracing::{error, warn};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::SubscribeRequestFilterBlocks;
 use yellowstone_grpc_proto::geyser::{
@@ -100,8 +101,15 @@ impl GrpcGeyserImpl {
                     match message {
                         Ok(message) => match message.update_oneof {
                             Some(UpdateOneof::Block(block)) => {
-                                let block_time = block.block_time.unwrap().timestamp;
-                                let blockhash = Hash::new(block.blockhash.as_bytes());
+                                let block_time = block.block_time.unwrap_or_default().timestamp;
+                                let blockhash = if let Ok(blockhash) =
+                                    Hash::from_str(block.blockhash.as_str())
+                                {
+                                    blockhash
+                                } else {
+                                    warn!("Invalid blockhash: {:?}", block.blockhash);
+                                    continue;
+                                };
                                 let slot = block.slot;
 
                                 // Update blockhash cache if bundle executor exists
@@ -110,11 +118,14 @@ impl GrpcGeyserImpl {
                                 }
 
                                 for transaction in block.transactions {
-                                    let mut signature_bytes: [u8; SIGNATURE_BYTES] =
-                                        [0; SIGNATURE_BYTES];
-                                    signature_bytes
-                                        .copy_from_slice(transaction.signature.as_slice());
-                                    let signature = Signature::from(signature_bytes).to_string();
+                                    let signature = if let Ok(signature) =
+                                        Signature::try_from(transaction.signature.as_slice())
+                                    {
+                                        signature.to_string()
+                                    } else {
+                                        warn!("Invalid signature: {:?}", transaction.signature);
+                                        continue;
+                                    };
                                     signature_cache.insert(signature, (block_time, Instant::now()));
                                 }
                             }
