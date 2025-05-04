@@ -10,17 +10,34 @@
 - Command-line tool for testing transaction bundles
 - Support for devnet and testnet RPC endpoints
 - Environment variable configuration for RPC and GRPC endpoints
+- Added confirmed transactions tracking in TransactionStore
+- Added methods to add, get, and remove confirmed transactions
+- Added transaction confirmation status tracking in TxnSender
+- Added sequential transaction processing in TransactionBundleExecutor
+- Added blockhash cache for transaction validation
 
 ### Changed
 - Improved transaction validation by checking blockhashes before sending
 - Enhanced error handling in transaction bundle execution
 - Updated documentation with detailed usage examples
 - Optimized bandwidth usage by validating blockhashes
+- Improved blockhash handling to update each transaction with the latest blockhash
+- Enhanced error reporting to return both successful signatures and error messages
+- Modified transaction bundle execution to continue processing on individual transaction failures
+- Modified transaction confirmation flow to use TransactionStore
+- Updated transaction bundle processing to handle confirmations sequentially
+- Improved error handling and logging for transaction confirmations
+- Removed direct RPC dependency from TransactionBundleExecutor
+- Optimized transaction confirmation polling interval
 
 ### Fixed
 - Fixed blockhash validation in transaction bundle execution
 - Improved error handling for failed transactions
 - Fixed metrics collection for transaction bundles
+- Fixed blockhash cache initialization and maintenance
+- Fixed transaction signature handling in confirmation process
+- Fixed transaction cleanup after confirmation
+- Fixed error handling in transaction confirmation loop
 
 ## [0.1.0] - Initial Release
 
@@ -36,22 +53,23 @@
 ### New RPC Method: `sendTransactionBundle`
 - Added new method to `AtlasTxnSender` trait in [`src/rpc_server.rs`](src/rpc_server.rs)
 - Accepts an array of transactions, parameters, and optional request metadata
-- Returns a vector of transaction signatures
+- Returns a tuple of successful signatures and error messages
 - Implements serial execution with proper error handling
 
 ### Transaction Bundle Executor
 - Created new `TransactionBundleExecutor` struct in [`src/transaction_bundle.rs`](src/transaction_bundle.rs)
 - Implements serial execution of transactions
-- Validates blockhashes before sending transactions
+- Updates each transaction with the latest blockhash from cache
 - Maintains a cache of recent blockhashes
 - Provides proper metrics and error handling
+- Continues processing on individual transaction failures
 
 ### Blockhash Validation
 - Added blockhash cache to track valid blockhashes in [`src/transaction_bundle.rs`](src/transaction_bundle.rs)
-- Validates blockhashes before sending transactions
-- Skips transactions with expired blockhashes
-- Updates cache when new blocks are received in [`src/grpc_geyser.rs`](src/grpc_geyser.rs)
+- Updates transactions with latest blockhash before sending
+- Uses GRPC stream to maintain blockhash cache
 - Provides metrics for invalid blockhashes
+- Improved error reporting for blockhash-related issues
 
 ### Integration with Existing Components
 - Uses existing transaction store for deduplication
@@ -72,6 +90,7 @@ New metrics added:
 - `confirmed_transaction_in_bundle`: Count of confirmed transactions
 - `error_transaction_in_bundle`: Count of failed transactions
 - `invalid_blockhash`: Count of transactions with expired blockhashes
+- `no_valid_blockhash`: Count of times no valid blockhash was available
 
 ### Environment Variables
 - `RPC_URL`: RPC url used to fetch next leaders with `getSlotLeaders`

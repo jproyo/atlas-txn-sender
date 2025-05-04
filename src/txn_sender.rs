@@ -13,7 +13,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tonic::async_trait;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     leader_tracker::LeaderTracker,
@@ -33,6 +33,8 @@ const SEND_TXN_RETRIES: usize = 10;
 #[async_trait]
 pub trait TxnSender: Send + Sync {
     fn send_transaction(&self, txn: TransactionData);
+    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64>;
+    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64>;
 }
 
 pub struct TxnSenderImpl {
@@ -176,6 +178,7 @@ impl TxnSenderImpl {
     fn track_transaction(&self, transaction_data: &TransactionData) {
         let sent_at = transaction_data.sent_at;
         let signature = get_signature(transaction_data);
+        debug!("Tracking transaction: {:?}", signature.clone());
         if signature.is_none() {
             return;
         }
@@ -196,8 +199,9 @@ impl TxnSenderImpl {
             .map(|m| m.api_key.clone())
             .unwrap_or("none".to_string());
         self.txn_sender_runtime.spawn(async move {
+            debug!("Confirming transaction: {}", signature);
             let confirmed_at = solana_rpc.confirm_transaction(signature.clone()).await;
-            let transcation_data = transaction_store.remove_transaction(signature);
+            let transcation_data = transaction_store.remove_transaction(signature.clone());
             let mut retries = None;
             let mut max_retries = None;
             if let Some(transaction_data) = transcation_data {
@@ -211,11 +215,16 @@ impl TxnSenderImpl {
             // Collect metrics
             // We separate the retry metrics to reduce the cardinality with API key and price.
             let landed = if confirmed_at.is_some() {
+                if let Some(block_time) = confirmed_at {
+                    debug!("Adding confirmed transaction: {} at block time {}", signature, block_time);
+                    transaction_store.add_confirmed_transaction(signature.clone(), block_time);
+                }
                 statsd_count!("transactions_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_landed_by_key", 1, "api_key" => &api_key);
                 statsd_time!("transaction_land_time", sent_at.elapsed(), "api_key" => &api_key, "priority_fees_enabled" => &priority_fees_enabled);
                 "true"
             } else {
+                debug!("Transaction not landed: {}", signature);
                 statsd_count!("transactions_not_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_not_landed_by_key", 1, "api_key" => &api_key);
                 statsd_count!("transactions_not_landed_retries", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
@@ -311,6 +320,7 @@ impl TxnSender for TxnSenderImpl {
                                 }
                         } else {
                             let leader_num_str = leader_num.to_string();
+                            debug!("Transaction received by leader: {:?}", leader_num_str);
                             statsd_time!(
                                 "transaction_received_by_leader",
                                 transaction_data.sent_at.elapsed(), "leader_num" => &leader_num_str, "api_key" => &api_key, "retry" => "false");
@@ -324,6 +334,15 @@ impl TxnSender for TxnSenderImpl {
             });
             leader_num += 1;
         }
+    }
+
+    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64> {
+        self.transaction_store.get_confirmed_transaction(signature)
+    }
+
+    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64> {
+        self.transaction_store
+            .remove_confirmed_transaction(signature)
     }
 }
 

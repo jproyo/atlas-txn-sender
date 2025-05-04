@@ -1,93 +1,97 @@
+use crate::{transaction_store::TransactionData, txn_sender::TxnSender};
 use anyhow::anyhow;
 use cadence_macros::statsd_count;
+use dashmap::DashMap;
 use solana_sdk::clock::Slot;
 use solana_sdk::hash::Hash;
 use std::sync::Arc;
-
-use crate::{
-    solana_rpc::SolanaRpc,
-    transaction_store::{TransactionData, TransactionStore},
-    txn_sender::TxnSender,
-};
+use tracing::{debug, warn};
 
 pub struct TransactionBundleExecutor {
     txn_sender: Arc<dyn TxnSender>,
-    transaction_store: Arc<dyn TransactionStore>,
-    solana_rpc: Arc<dyn SolanaRpc>,
-    recent_blockhash_cache: Arc<dashmap::DashMap<Hash, Slot>>,
+    recent_blockhash_cache: Arc<DashMap<Hash, Slot>>,
 }
 
 impl TransactionBundleExecutor {
     pub fn new(
         txn_sender: Arc<dyn TxnSender>,
-        transaction_store: Arc<dyn TransactionStore>,
-        solana_rpc: Arc<dyn SolanaRpc>,
-        recent_blockhash_cache: Arc<dashmap::DashMap<Hash, Slot>>,
+        recent_blockhash_cache: Arc<DashMap<Hash, Slot>>,
     ) -> Self {
         Self {
             txn_sender,
-            transaction_store,
-            solana_rpc,
             recent_blockhash_cache,
         }
+    }
+
+    async fn wait_for_confirmation(&self, signature: &str, api_key: &str) -> Option<i64> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(60) {
+            if let Some(block_time) = self.txn_sender.get_confirmed_transaction(signature) {
+                let block_time_str = block_time.to_string();
+                statsd_count!("confirmed_transaction_in_bundle", 1, "api_key" => api_key, "block" => &block_time_str);
+                debug!("Transaction confirmed: {:?}", signature);
+                self.txn_sender.remove_confirmed_transaction(signature);
+                return Some(block_time);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
     }
 
     pub async fn execute_bundle(
         &self,
         transactions: Vec<TransactionData>,
         api_key: &str,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let mut signatures = Vec::new();
-        let mut valid_transactions = Vec::new();
+        let mut errors = Vec::new();
 
-        // First pass: validate blockhashes and collect valid transactions
-        for transaction in transactions {
-            let signature = transaction.versioned_transaction.signatures[0].to_string();
-            let blockhash = transaction.versioned_transaction.message.recent_blockhash();
+        // Process each transaction individually
+        for mut transaction in transactions {
+            // Get latest blockhash from cache
+            let latest_blockhash = self
+                .recent_blockhash_cache
+                .iter()
+                .max_by_key(|entry| *entry.value())
+                .map(|entry| *entry.key())
+                .unwrap_or_else(|| {
+                    warn!("No valid blockhash found in cache, using default");
+                    Hash::default()
+                });
 
-            // Check if blockhash is still valid or if it's the default blockhash and cache is empty
-            if let Some(_slot) = self.recent_blockhash_cache.get(blockhash) {
-                // Blockhash is still valid, proceed with transaction
-                valid_transactions.push(transaction);
-                signatures.push(signature);
-            } else if *blockhash == Hash::default() && self.recent_blockhash_cache.is_empty() {
-                // Accept default blockhash if cache is empty
-                valid_transactions.push(transaction);
-                signatures.push(signature);
-            } else {
-                // Blockhash is no longer valid, skip this transaction
-                statsd_count!("invalid_blockhash", 1, "api_key" => api_key);
-                continue;
-            }
-        }
+            dbg!(latest_blockhash);
 
-        dbg!(valid_transactions.len());
-
-        // Second pass: execute valid transactions serially
-        for transaction in valid_transactions {
+            // Update transaction with latest blockhash
+            transaction
+                .versioned_transaction
+                .message
+                .set_recent_blockhash(latest_blockhash);
             let signature = transaction.versioned_transaction.signatures[0].to_string();
 
-            // Send transaction
+            debug!("Sending transaction: {}", signature);
             self.txn_sender.send_transaction(transaction.clone());
+            debug!("Transaction sent: {:?}", signature);
             statsd_count!("send_transaction_in_bundle", 1, "api_key" => api_key);
 
             // Wait for confirmation
-            match self.solana_rpc.confirm_transaction(signature.clone()).await {
+            match self.wait_for_confirmation(&signature, api_key).await {
                 Some(_) => {
-                    statsd_count!("confirmed_transaction_in_bundle", 1, "api_key" => api_key);
-                    self.transaction_store.add_transaction(transaction);
+                    signatures.push(signature.clone());
                 }
                 None => {
                     statsd_count!("error_transaction_in_bundle", 1, "api_key" => api_key);
-                    return Err(anyhow!("Error processing transaction {}", signature));
+                    warn!("Transaction not confirmed: {:?}", signature);
+                    errors.push(format!("Error processing transaction {:?}", signature));
                 }
             }
+            self.txn_sender
+                .remove_confirmed_transaction(signature.as_str());
         }
 
         if signatures.is_empty() {
-            return Err(anyhow!("No transactions were confirmed"));
+            Err(anyhow!("No transactions confirmed"))
+        } else {
+            Ok((signatures, errors))
         }
-
-        Ok(signatures)
     }
 }

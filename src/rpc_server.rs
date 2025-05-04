@@ -6,7 +6,7 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::ErrorObjectOwned,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use solana_program_runtime::log_collector::log::info;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_sdk::transaction::VersionedTransaction;
@@ -26,6 +26,13 @@ pub struct RequestMetadata {
     pub api_key: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+pub struct SendTransactionBundleResponse {
+    pub signatures: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 #[rpc(server)]
 pub trait AtlasTxnSender {
     #[method(name = "health")]
@@ -43,7 +50,7 @@ pub trait AtlasTxnSender {
         txns: Vec<String>,
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
-    ) -> RpcResult<Vec<String>>;
+    ) -> RpcResult<SendTransactionBundleResponse>;
 }
 
 pub struct AtlasTxnSenderImpl {
@@ -150,7 +157,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         txns: Vec<String>,
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
-    ) -> RpcResult<Vec<String>> {
+    ) -> RpcResult<SendTransactionBundleResponse> {
         info!("Sending transaction bundle: {:?}", txns);
         let sent_at = Instant::now();
         let api_key = request_metadata
@@ -180,7 +187,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
             transactions.push(transaction);
         }
 
-        let signatures = self
+        let (signatures, errors) = self
             .bundle_executor
             .execute_bundle(transactions, &api_key)
             .await
@@ -192,8 +199,10 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
             "api_key" => &api_key
         );
 
-        info!("Transaction bundle sent successfully! {:?}", signatures);
-        Ok(signatures)
+        let response = SendTransactionBundleResponse { signatures, errors };
+
+        info!("Transaction bundle sent successfully! {:?}", response);
+        Ok(response)
     }
 }
 

@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
         leader_tracker,
         transaction_store.clone(),
         connection_cache,
-        solana_rpc.clone(),
+        solana_rpc,
         env.txn_sender_threads.unwrap_or(4),
         txn_send_retry_interval_seconds,
         env.max_retry_queue_size,
@@ -119,8 +119,6 @@ async fn main() -> anyhow::Result<()> {
     let max_txn_send_retries = env.max_txn_send_retries.unwrap_or(5);
     let bundle_executor = Arc::new(TransactionBundleExecutor::new(
         txn_sender.clone(),
-        transaction_store.clone(),
-        solana_rpc.clone(),
         blockhash_record,
     ));
     let atlas_txn_sender = AtlasTxnSenderImpl::new(

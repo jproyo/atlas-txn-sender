@@ -17,7 +17,7 @@ use solana_sdk::hash::Hash;
 use solana_sdk::signature::Signature;
 use tokio::time::sleep;
 use tonic::async_trait;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::SubscribeRequestFilterBlocks;
 use yellowstone_grpc_proto::geyser::{
@@ -282,14 +282,20 @@ impl GrpcGeyserImpl {
 #[async_trait]
 impl SolanaRpc for GrpcGeyserImpl {
     async fn confirm_transaction(&self, signature: String) -> Option<UnixTimestamp> {
+        debug!("Waiting for confirmation of transaction: {}", signature);
         let start = Instant::now();
         // in practice if a tx doesn't land in less than 60 seconds it's probably not going to land
         while start.elapsed() < Duration::from_secs(60) {
             if let Some(block_time) = self.signature_cache.get(&signature) {
+                debug!(
+                    "Found signature: {:?}, block_time: {:?}",
+                    signature, block_time.0
+                );
                 return Some(block_time.0);
             }
             sleep(Duration::from_millis(10)).await;
         }
+        debug!("Transaction confirmation timed out: {}", signature);
         return None;
     }
     fn get_next_slot(&self) -> Option<u64> {
