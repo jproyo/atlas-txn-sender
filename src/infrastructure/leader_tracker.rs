@@ -16,7 +16,8 @@ use solana_sdk::slot_history::Slot;
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use crate::{errors::AtlasTxnSenderError, solana_rpc::SolanaRpc};
+use super::solana_rpc::SolanaRpc;
+use crate::errors::AtlasTxnSenderError;
 
 pub trait LeaderTracker: Send + Sync {
     /// get_leaders returns the next slot leaders in order

@@ -1,37 +1,21 @@
 use std::{sync::Arc, time::Instant};
 
-use cadence_macros::{statsd_count, statsd_time};
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
     types::ErrorObjectOwned,
 };
-use serde::{Deserialize, Serialize};
 use solana_program_runtime::log_collector::log::info;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_transaction_status::{TransactionBinaryEncoding, UiTransactionEncoding};
 
 use crate::{
+    application::transaction::{AtlasTransaction, RequestMetadata, SendTransactionBundleResponse},
     errors::{invalid_request, AtlasTxnSenderError},
-    transaction_bundle::TransactionBundleExecutor,
-    transaction_store::{TransactionData, TransactionStore},
-    txn_sender::TxnSender,
+    storage::transaction_store::TransactionData,
     vendor::solana_rpc::decode_and_deserialize,
 };
-
-#[derive(Deserialize, Clone, Debug)]
-#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
-pub struct RequestMetadata {
-    pub api_key: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
-pub struct SendTransactionBundleResponse {
-    pub signatures: Vec<String>,
-    pub errors: Vec<String>,
-}
 
 #[rpc(server)]
 pub trait AtlasTxnSender {
@@ -54,24 +38,18 @@ pub trait AtlasTxnSender {
 }
 
 pub struct AtlasTxnSenderImpl {
-    txn_sender: Arc<dyn TxnSender>,
-    transaction_store: Arc<dyn TransactionStore>,
+    application: Arc<dyn AtlasTransaction + Send + Sync + 'static>,
     max_txn_send_retries: usize,
-    bundle_executor: Arc<TransactionBundleExecutor>,
 }
 
 impl AtlasTxnSenderImpl {
     pub fn new(
-        txn_sender: Arc<dyn TxnSender>,
-        transaction_store: Arc<dyn TransactionStore>,
+        application: Arc<dyn AtlasTransaction + Send + Sync + 'static>,
         max_txn_send_retries: usize,
-        bundle_executor: Arc<TransactionBundleExecutor>,
     ) -> Self {
         Self {
-            txn_sender,
+            application,
             max_txn_send_retries,
-            transaction_store,
-            bundle_executor,
         }
     }
 }
@@ -122,34 +100,22 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<String> {
-        info!("Sending transaction: {:?}", txn);
-        let api_key = request_metadata
-            .clone()
-            .map(|m| m.api_key)
-            .unwrap_or("none".to_string());
-        statsd_count!("send_transaction", 1, "api_key" => &api_key);
         validate_send_transaction_params(&params)?;
-        let start = Instant::now();
         let encoding = params.encoding.unwrap_or(UiTransactionEncoding::Base58);
         let binary_encoding = encoding.into_binary_encoding().ok_or_else(|| {
             invalid_request(&format!(
                 "unsupported encoding: {encoding}. Supported encodings: base58, base64"
             ))
         })?;
-        let transaction =
-            self.create_transaction_data(params, request_metadata, binary_encoding, txn)?;
-        let signature = transaction.versioned_transaction.signatures[0].to_string();
-        if self.transaction_store.has_signature(&signature) {
-            statsd_count!("duplicate_transaction", 1, "api_key" => &api_key);
-            return Ok(signature);
-        }
-        self.txn_sender.send_transaction(transaction);
-        statsd_time!(
-            "send_transaction_time",
-            start.elapsed(),
-            "api_key" => &api_key
-        );
-        Ok(signature)
+
+        let transaction_data =
+            self.create_transaction_data(params, request_metadata.clone(), binary_encoding, txn)?;
+
+        let signature_resp = self
+            .application
+            .send_transaction(transaction_data, request_metadata)
+            .await?;
+        Ok(signature_resp)
     }
 
     async fn send_transaction_bundle(
@@ -159,12 +125,6 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<SendTransactionBundleResponse> {
         info!("Sending transaction bundle: {:?}", txns);
-        let sent_at = Instant::now();
-        let api_key = request_metadata
-            .clone()
-            .map(|m| m.api_key)
-            .unwrap_or("none".to_string());
-        statsd_count!("send_transaction_bundle", 1, "api_key" => &api_key);
         validate_send_transaction_params(&params)?;
 
         let encoding = params.encoding.unwrap_or(UiTransactionEncoding::Base58);
@@ -178,30 +138,21 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
 
         // Decode and validate all transactions first
         for txn in txns {
-            let transaction = self.create_transaction_data(
+            let transaction_data = self.create_transaction_data(
                 params,
                 request_metadata.clone(),
                 binary_encoding,
                 txn,
             )?;
-            transactions.push(transaction);
+            transactions.push(transaction_data);
         }
 
-        let (signatures, errors) = self
-            .bundle_executor
-            .execute_bundle(transactions, &api_key)
+        let response = self
+            .application
+            .send_transaction_bundle(transactions, request_metadata)
             .await
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
-        statsd_time!(
-            "send_transaction_bundle_time",
-            sent_at.elapsed(),
-            "api_key" => &api_key
-        );
-
-        let response = SendTransactionBundleResponse { signatures, errors };
-
-        info!("Transaction bundle sent successfully! {:?}", response);
         Ok(response)
     }
 }

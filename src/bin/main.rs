@@ -1,8 +1,12 @@
+use atlas_txn_sender::application::transaction::AtlasTransactionApp;
+use atlas_txn_sender::infrastructure::transaction_bundle::TransactionBundleExecutor;
+use atlas_txn_sender::infrastructure::txn_sender::TxnSenderImpl;
+use atlas_txn_sender::infrastructure::{
+    grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl,
+};
 use atlas_txn_sender::metrics::new_metrics_client;
-use atlas_txn_sender::rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
-use atlas_txn_sender::transaction_bundle::TransactionBundleExecutor;
-use atlas_txn_sender::{grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl};
-use atlas_txn_sender::{transaction_store::TransactionStoreImpl, txn_sender::TxnSenderImpl};
+use atlas_txn_sender::server::rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
+use atlas_txn_sender::storage::transaction_store::TransactionStoreImpl;
 use dashmap::DashMap;
 use figment::{providers::Env, Figment};
 use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
@@ -121,12 +125,8 @@ async fn main() -> anyhow::Result<()> {
         txn_sender.clone(),
         blockhash_record,
     ));
-    let atlas_txn_sender = AtlasTxnSenderImpl::new(
-        txn_sender,
-        transaction_store,
-        max_txn_send_retries,
-        bundle_executor,
-    );
+    let atlas_txn_sender_app = Arc::new(AtlasTransactionApp::new(txn_sender, bundle_executor));
+    let atlas_txn_sender = AtlasTxnSenderImpl::new(atlas_txn_sender_app, max_txn_send_retries);
     let handle = server.start(atlas_txn_sender.into_rpc());
     handle.stopped().await;
     Ok(())

@@ -6,16 +6,15 @@ use solana_sdk::transaction::VersionedTransaction;
 use tracing::debug;
 use tracing::error;
 
-use crate::rpc_server::RequestMetadata;
+use crate::application::transaction::RequestMetadata;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TransactionData {
     pub wire_transaction: Vec<u8>,
     pub versioned_transaction: VersionedTransaction,
     pub sent_at: Instant,
     pub retry_count: usize,
     pub max_retries: usize,
-    // might not be the best spot but is easy to add for what we need out of metrics now
     pub request_metadata: Option<RequestMetadata>,
 }
 

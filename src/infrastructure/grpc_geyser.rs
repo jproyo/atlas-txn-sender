@@ -25,7 +25,7 @@ use yellowstone_grpc_proto::geyser::{
     SubscribeRequestPing,
 };
 
-use crate::solana_rpc::SolanaRpc;
+use super::solana_rpc::SolanaRpc;
 
 pub struct GrpcGeyserImpl {
     endpoint: String,

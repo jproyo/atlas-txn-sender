@@ -29,6 +29,12 @@
 - Improved error handling and logging for transaction confirmations
 - Removed direct RPC dependency from TransactionBundleExecutor
 - Optimized transaction confirmation polling interval
+- Refactored codebase into modular structure:
+  - `server`: RPC server implementation
+  - `application`: Core business logic with transaction processing
+  - `storage`: Transaction store implementation
+  - `infrastructure`: Infrastructure components (txn_sender, transaction_bundle, solana_rpc, grpc_geyser, leader_tracker)
+  - `metrics`: Metrics implementation
 
 ### Fixed
 - Fixed blockhash validation in transaction bundle execution
