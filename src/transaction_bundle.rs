@@ -45,9 +45,13 @@ impl TransactionBundleExecutor {
             let signature = transaction.versioned_transaction.signatures[0].to_string();
             let blockhash = transaction.versioned_transaction.message.recent_blockhash();
 
-            // Check if blockhash is still valid
+            // Check if blockhash is still valid or if it's the default blockhash and cache is empty
             if let Some(_slot) = self.recent_blockhash_cache.get(blockhash) {
                 // Blockhash is still valid, proceed with transaction
+                valid_transactions.push(transaction);
+                signatures.push(signature);
+            } else if *blockhash == Hash::default() && self.recent_blockhash_cache.is_empty() {
+                // Accept default blockhash if cache is empty
                 valid_transactions.push(transaction);
                 signatures.push(signature);
             } else {
@@ -56,6 +60,8 @@ impl TransactionBundleExecutor {
                 continue;
             }
         }
+
+        dbg!(valid_transactions.len());
 
         // Second pass: execute valid transactions serially
         for transaction in valid_transactions {
@@ -76,6 +82,10 @@ impl TransactionBundleExecutor {
                     return Err(anyhow!("Error processing transaction {}", signature));
                 }
             }
+        }
+
+        if signatures.is_empty() {
+            return Err(anyhow!("No transactions were confirmed"));
         }
 
         Ok(signatures)

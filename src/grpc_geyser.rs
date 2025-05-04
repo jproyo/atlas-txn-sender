@@ -3,18 +3,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::Result;
 use cadence_macros::statsd_count;
 use dashmap::DashMap;
 use futures::sink::SinkExt;
 use futures::StreamExt;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
+use solana_client::rpc_client::RpcClient;
 use solana_sdk::clock::{Slot, UnixTimestamp};
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;
 use solana_sdk::signature::Signature;
 use tokio::time::sleep;
 use tonic::async_trait;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::SubscribeRequestFilterBlocks;
 use yellowstone_grpc_proto::geyser::{
@@ -28,15 +31,15 @@ pub struct GrpcGeyserImpl {
     endpoint: String,
     auth_header: Option<String>,
     cur_slot: Arc<AtomicU64>,
-    signature_cache: Arc<DashMap<String, (UnixTimestamp, Instant)>>,
-    recent_blockhash_cache: Option<Arc<dashmap::DashMap<Hash, Slot>>>,
+    signature_cache: Arc<DashMap<String, (i64, Instant)>>,
+    recent_blockhash_cache: Option<Arc<DashMap<Hash, Slot>>>,
 }
 
 impl GrpcGeyserImpl {
     pub fn new(
         endpoint: String,
         auth_header: Option<String>,
-        recent_blockhash_cache: Option<Arc<dashmap::DashMap<Hash, Slot>>>,
+        recent_blockhash_cache: Option<Arc<DashMap<Hash, Slot>>>,
     ) -> Self {
         let grpc_geyser = Self {
             endpoint,
@@ -45,6 +48,35 @@ impl GrpcGeyserImpl {
             signature_cache: Arc::new(DashMap::new()),
             recent_blockhash_cache,
         };
+        // polling with processed commitment to get latest leaders
+        grpc_geyser.poll_slots();
+        // polling with confirmed commitment to get confirmed transactions
+        grpc_geyser.poll_blocks();
+        grpc_geyser.clean_signature_cache();
+        grpc_geyser
+    }
+
+    pub fn new_with_rpc(
+        endpoint: String,
+        auth_header: Option<String>,
+        recent_blockhash_cache: Option<Arc<DashMap<Hash, Slot>>>,
+        rpc_client: &RpcClient,
+    ) -> Self {
+        let grpc_geyser = Self {
+            endpoint,
+            auth_header,
+            cur_slot: Arc::new(AtomicU64::new(0)),
+            signature_cache: Arc::new(DashMap::new()),
+            recent_blockhash_cache,
+        };
+
+        // Initialize blockhash cache if provided
+
+        if let Some(cache) = &grpc_geyser.recent_blockhash_cache {
+            Self::initialize_blockhash_cache(rpc_client, cache)
+                .expect("Failed to initialize blockhash cache");
+        }
+
         // polling with processed commitment to get latest leaders
         grpc_geyser.poll_slots();
         // polling with confirmed commitment to get confirmed transactions
@@ -115,6 +147,9 @@ impl GrpcGeyserImpl {
                                 // Update blockhash cache if bundle executor exists
                                 if let Some(executor) = &bundle_executor {
                                     executor.insert(blockhash, slot);
+                                    // Clean up old blockhashes (keep last 150 slots)
+                                    let current_slot = slot;
+                                    executor.retain(|_, s| current_slot - *s <= 150);
                                 }
 
                                 for transaction in block.transactions {
@@ -222,6 +257,25 @@ impl GrpcGeyserImpl {
                 sleep(Duration::from_secs(1)).await;
             }
         });
+    }
+
+    fn initialize_blockhash_cache(
+        rpc_client: &RpcClient,
+        cache: &Arc<DashMap<Hash, Slot>>,
+    ) -> Result<()> {
+        // Get the latest slot and blockhash
+        let slot = rpc_client.get_slot_with_commitment(CommitmentConfig::confirmed())?;
+        let (blockhash, _) =
+            rpc_client.get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())?;
+
+        // Insert into cache
+        cache.insert(blockhash, slot);
+        info!(
+            "Initialized blockhash cache with latest blockhash: {} at slot {}",
+            blockhash, slot
+        );
+
+        Ok(())
     }
 }
 

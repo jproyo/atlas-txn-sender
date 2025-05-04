@@ -7,6 +7,7 @@ use jsonrpsee::{
     types::ErrorObjectOwned,
 };
 use serde::Deserialize;
+use solana_program_runtime::log_collector::log::info;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_transaction_status::{TransactionBinaryEncoding, UiTransactionEncoding};
@@ -114,6 +115,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<String> {
+        info!("Sending transaction: {:?}", txn);
         let api_key = request_metadata
             .clone()
             .map(|m| m.api_key)
@@ -149,6 +151,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         params: RpcSendTransactionConfig,
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<Vec<String>> {
+        info!("Sending transaction bundle: {:?}", txns);
         let sent_at = Instant::now();
         let api_key = request_metadata
             .clone()
@@ -189,6 +192,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
             "api_key" => &api_key
         );
 
+        info!("Transaction bundle sent successfully! {:?}", signatures);
         Ok(signatures)
     }
 }

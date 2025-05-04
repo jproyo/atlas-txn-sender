@@ -90,12 +90,14 @@ async fn main() -> anyhow::Result<()> {
 
     let transaction_store = Arc::new(TransactionStoreImpl::new());
     let blockhash_record = Arc::new(DashMap::new());
-    let solana_rpc = Arc::new(GrpcGeyserImpl::new(
+    let rpc_client = Arc::new(RpcClient::new(env.rpc_url.unwrap()));
+    let solana_rpc = Arc::new(GrpcGeyserImpl::new_with_rpc(
         env.grpc_url.clone().unwrap(),
         env.x_token.clone(),
         Some(blockhash_record.clone()),
+        &rpc_client,
     ));
-    let rpc_client = Arc::new(RpcClient::new(env.rpc_url.unwrap()));
+
     let num_leaders = env.num_leaders.unwrap_or(2);
     let leader_offset = env.leader_offset.unwrap_or(0);
     let leader_tracker = Arc::new(LeaderTrackerImpl::new(
