@@ -1,6 +1,5 @@
 use atlas_txn_sender::application::transaction::AtlasTransactionApp;
-use atlas_txn_sender::infrastructure::transaction_bundle::TransactionBundleExecutor;
-use atlas_txn_sender::infrastructure::txn_sender::TxnSenderImpl;
+use atlas_txn_sender::infrastructure::txn_sender::{TxnSenderConfig, TxnSenderImpl};
 use atlas_txn_sender::infrastructure::{
     grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl,
 };
@@ -111,21 +110,21 @@ async fn main() -> anyhow::Result<()> {
         leader_offset,
     ));
     let txn_send_retry_interval_seconds = env.txn_send_retry_interval.unwrap_or(2);
+    let tx_sender_config = TxnSenderConfig::new(
+        env.txn_sender_threads.unwrap_or(4),
+        txn_send_retry_interval_seconds,
+        env.max_retry_queue_size,
+        blockhash_record,
+    );
     let txn_sender = Arc::new(TxnSenderImpl::new(
         leader_tracker,
         transaction_store.clone(),
         connection_cache,
         solana_rpc,
-        env.txn_sender_threads.unwrap_or(4),
-        txn_send_retry_interval_seconds,
-        env.max_retry_queue_size,
+        tx_sender_config,
     ));
     let max_txn_send_retries = env.max_txn_send_retries.unwrap_or(5);
-    let bundle_executor = Arc::new(TransactionBundleExecutor::new(
-        txn_sender.clone(),
-        blockhash_record,
-    ));
-    let atlas_txn_sender_app = Arc::new(AtlasTransactionApp::new(txn_sender, bundle_executor));
+    let atlas_txn_sender_app = Arc::new(AtlasTransactionApp::new(txn_sender, transaction_store));
     let atlas_txn_sender = AtlasTxnSenderImpl::new(atlas_txn_sender_app, max_txn_send_retries);
     let handle = server.start(atlas_txn_sender.into_rpc());
     handle.stopped().await;

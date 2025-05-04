@@ -6,26 +6,26 @@ use tonic::async_trait;
 use tracing::info;
 
 use crate::errors::AtlasTxnSenderError;
-use crate::infrastructure::transaction_bundle::TransactionBundleExecutor;
 use crate::infrastructure::txn_sender::TxnSender;
-use crate::storage::transaction_store::TransactionData;
+use crate::storage::transaction_store::{TransactionData, TransactionStore};
 
 pub struct AtlasTransactionApp {
     txn_sender: Arc<dyn TxnSender>,
-    bundle_executor: Arc<TransactionBundleExecutor>,
+    transaction_store: Arc<dyn TransactionStore>,
 }
 
 impl AtlasTransactionApp {
     pub fn new(
         txn_sender: Arc<dyn TxnSender>,
-        bundle_executor: Arc<TransactionBundleExecutor>,
+        transaction_store: Arc<dyn TransactionStore>,
     ) -> Self {
         Self {
             txn_sender,
-            bundle_executor,
+            transaction_store,
         }
     }
 }
+
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
 pub struct RequestMetadata {
@@ -40,15 +40,15 @@ pub struct SendTransactionBundleResponse {
 }
 
 #[async_trait]
-pub trait AtlasTransaction {
+pub trait AtlasTransaction: Send + Sync {
     async fn send_transaction(
         &self,
-        txn_data: TransactionData,
+        transaction: TransactionData,
         request_metadata: Option<RequestMetadata>,
     ) -> Result<String, AtlasTxnSenderError>;
-    async fn send_transaction_bundle(
+    fn send_transaction_bundle(
         &self,
-        txns: Vec<TransactionData>,
+        transactions: Vec<TransactionData>,
         request_metadata: Option<RequestMetadata>,
     ) -> Result<SendTransactionBundleResponse, AtlasTxnSenderError>;
 }
@@ -57,39 +57,34 @@ pub trait AtlasTransaction {
 impl AtlasTransaction for AtlasTransactionApp {
     async fn send_transaction(
         &self,
-        txn_data: TransactionData,
+        transaction: TransactionData,
         request_metadata: Option<RequestMetadata>,
     ) -> Result<String, AtlasTxnSenderError> {
-        info!(
-            "Sending transaction: {:?}",
-            txn_data.versioned_transaction.signatures[0]
-        );
-        let start = Instant::now();
+        let signature = transaction.versioned_transaction.signatures[0].to_string();
         let api_key = request_metadata
             .clone()
             .map(|m| m.api_key)
             .unwrap_or("none".to_string());
         statsd_count!("send_transaction", 1, "api_key" => &api_key);
-        self.txn_sender.send_transaction(txn_data.clone());
 
-        let signature = txn_data.versioned_transaction.signatures[0].to_string();
+        if self.transaction_store.has_signature(&signature) {
+            statsd_count!("duplicate_transaction", 1, "api_key" => &api_key);
+            return Ok(signature);
+        }
 
-        statsd_time!(
-            "send_transaction_time",
-            start.elapsed(),
-            "api_key" => &api_key
-        );
+        self.txn_sender.send_transaction(transaction);
         Ok(signature)
     }
 
-    async fn send_transaction_bundle(
+    fn send_transaction_bundle(
         &self,
-        txns: Vec<TransactionData>,
+        transactions: Vec<TransactionData>,
         request_metadata: Option<RequestMetadata>,
     ) -> Result<SendTransactionBundleResponse, AtlasTxnSenderError> {
         info!(
             "Sending transaction bundle: {:?}",
-            txns.iter()
+            transactions
+                .iter()
                 .map(|t| t.versioned_transaction.signatures[0].to_string())
                 .collect::<Vec<String>>()
         );
@@ -100,9 +95,8 @@ impl AtlasTransaction for AtlasTransactionApp {
             .unwrap_or("none".to_string());
         statsd_count!("send_transaction_bundle", 1, "api_key" => &api_key);
         let (signatures, errors) = self
-            .bundle_executor
-            .execute_bundle(txns, &api_key)
-            .await
+            .txn_sender
+            .send_transaction_bundle(transactions, &api_key)
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
         statsd_time!(

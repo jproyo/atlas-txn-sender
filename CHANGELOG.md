@@ -35,6 +35,16 @@
   - `storage`: Transaction store implementation
   - `infrastructure`: Infrastructure components (txn_sender, transaction_bundle, solana_rpc, grpc_geyser, leader_tracker)
   - `metrics`: Metrics implementation
+- Moved transaction bundle logic from `TransactionBundleExecutor` to `TxnSender`:
+  - Integrated bundle functionality directly into `TxnSender` trait
+  - Removed separate `TransactionBundleExecutor` struct
+  - Simplified transaction bundle processing flow
+  - Improved error handling and metrics collection
+- Converted `send_transaction_bundle` to synchronous function:
+  - Removed async/await from bundle processing
+  - Simplified transaction confirmation waiting logic
+  - Improved performance by reducing async overhead
+  - Maintained same functionality with simpler implementation
 
 ### Fixed
 - Fixed blockhash validation in transaction bundle execution

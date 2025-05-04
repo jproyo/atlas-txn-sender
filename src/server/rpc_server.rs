@@ -29,7 +29,7 @@ pub trait AtlasTxnSender {
         request_metadata: Option<RequestMetadata>,
     ) -> RpcResult<String>;
     #[method(name = "sendTransactionBundle")]
-    async fn send_transaction_bundle(
+    fn send_transaction_bundle(
         &self,
         txns: Vec<String>,
         params: RpcSendTransactionConfig,
@@ -118,7 +118,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         Ok(signature_resp)
     }
 
-    async fn send_transaction_bundle(
+    fn send_transaction_bundle(
         &self,
         txns: Vec<String>,
         params: RpcSendTransactionConfig,
@@ -150,7 +150,6 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
         let response = self
             .application
             .send_transaction_bundle(transactions, request_metadata)
-            .await
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
         Ok(response)
