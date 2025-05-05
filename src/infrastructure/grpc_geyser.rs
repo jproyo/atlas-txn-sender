@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use futures::{SinkExt as _, StreamExt as _};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use solana_rpc_client::rpc_client::RpcClient;
+use solana_client::rpc_client::RpcClient;
 use solana_sdk::clock::{Slot, UnixTimestamp};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;

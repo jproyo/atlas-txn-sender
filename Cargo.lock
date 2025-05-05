@@ -462,7 +462,6 @@ dependencies = [
  "serde_json",
  "solana-client",
  "solana-program-runtime",
- "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-sdk",
  "solana-transaction-status",

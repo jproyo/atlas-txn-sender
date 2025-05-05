@@ -11,7 +11,8 @@ use figment::{providers::Env, Figment};
 use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
 use serde::Deserialize;
 use solana_client::connection_cache::ConnectionCache;
-use solana_rpc_client::rpc_client::RpcClient;
+use solana_client::rpc_client::RpcClient;
+
 use solana_sdk::signature::{read_keypair_file, Keypair};
 use std::{
     env,

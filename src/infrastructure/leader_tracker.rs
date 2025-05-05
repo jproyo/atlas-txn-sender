@@ -17,7 +17,7 @@ use tracing::{debug, error, info};
 
 use super::solana_rpc::SolanaRpc;
 use crate::errors::AtlasTxnSenderError;
-use solana_rpc_client::rpc_client::RpcClient;
+use solana_client::rpc_client::RpcClient;
 pub trait LeaderTracker: Send + Sync {
     /// get_leaders returns the next slot leaders in order
     fn get_leaders(&self) -> Vec<RpcContactInfo>;
