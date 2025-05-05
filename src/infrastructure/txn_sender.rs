@@ -4,7 +4,14 @@ use dashmap::DashMap;
 use solana_client::{
     connection_cache::ConnectionCache, nonblocking::tpu_connection::TpuConnection,
 };
-use solana_program_runtime::compute_budget::{ComputeBudget, MAX_COMPUTE_UNIT_LIMIT};
+use solana_program_runtime::{
+    compute_budget::ComputeBudget,
+    compute_budget_processor::{
+        process_compute_budget_instructions, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
+        MAX_COMPUTE_UNIT_LIMIT,
+    },
+    prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
+};
 use solana_sdk::{clock::Slot, hash::Hash, transaction::VersionedTransaction};
 use std::{
     sync::Arc,
@@ -19,8 +26,7 @@ use tracing::{debug, error, warn};
 
 use super::{leader_tracker::LeaderTracker, solana_rpc::SolanaRpc};
 use crate::storage::transaction_store::{get_signature, TransactionData, TransactionStore};
-use solana_program_runtime::compute_budget::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT;
-use solana_sdk::borsh0_10::try_from_slice_unchecked;
+use solana_sdk::borsh1::try_from_slice_unchecked;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 
 const RETRY_COUNT_BINS: [i32; 6] = [0, 1, 2, 5, 10, 25];
@@ -282,14 +288,6 @@ pub struct PriorityDetails {
 
 pub fn compute_priority_details(transaction: &VersionedTransaction) -> PriorityDetails {
     let mut cu_limit = DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT;
-    let mut compute_budget = ComputeBudget::new(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64);
-    if let Err(_e) = transaction.sanitize() {
-        return PriorityDetails {
-            fee: 0,
-            priority: 0,
-            cu_limit,
-        };
-    }
     let instructions = transaction.message.instructions().iter().map(|ix| {
         match try_from_slice_unchecked(&ix.data) {
             Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
@@ -307,14 +305,38 @@ pub fn compute_priority_details(transaction: &VersionedTransaction) -> PriorityD
             ix,
         )
     });
-    let compute_budget = compute_budget.process_instructions(instructions, true, true);
-    match compute_budget {
-        Ok(compute_budget) => PriorityDetails {
-            fee: compute_budget.get_fee(),
-            priority: compute_budget.get_priority(),
-            cu_limit,
-        },
-        Err(_e) => PriorityDetails {
+    let compute_budget = ComputeBudget::try_from_instructions(instructions);
+    let instructions = transaction.message.instructions().iter().map(|ix| {
+        match try_from_slice_unchecked(&ix.data) {
+            Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
+                cu_limit = compute_unit_limit.min(MAX_COMPUTE_UNIT_LIMIT);
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        (
+            transaction
+                .message
+                .static_account_keys()
+                .get(usize::from(ix.program_id_index))
+                .expect("program id index is sanitized"),
+            ix,
+        )
+    });
+    let compute_budget_limits = process_compute_budget_instructions(instructions);
+    match (compute_budget, compute_budget_limits) {
+        (Ok(compute_budget), Ok(compute_budget_limits)) => {
+            let priority_fee_type =
+                PrioritizationFeeType::ComputeUnitPrice(compute_budget_limits.compute_unit_price);
+            let fee =
+                PrioritizationFeeDetails::new(priority_fee_type, compute_budget.compute_unit_limit);
+            PriorityDetails {
+                fee: fee.get_fee(),
+                priority: fee.get_priority(),
+                cu_limit,
+            }
+        }
+        _ => PriorityDetails {
             fee: 0,
             priority: 0,
             cu_limit,

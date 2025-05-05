@@ -10,7 +10,8 @@ use dashmap::DashMap;
 use figment::{providers::Env, Figment};
 use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
 use serde::Deserialize;
-use solana_client::{connection_cache::ConnectionCache, rpc_client::RpcClient};
+use solana_client::connection_cache::ConnectionCache;
+use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::signature::{read_keypair_file, Keypair};
 use std::{
     env,
@@ -93,7 +94,9 @@ async fn main() -> anyhow::Result<()> {
 
     let transaction_store = Arc::new(TransactionStoreImpl::new());
     let blockhash_record = Arc::new(DashMap::new());
-    let rpc_client = Arc::new(RpcClient::new(env.rpc_url.unwrap()));
+    let rpc_client = Arc::new(RpcClient::new(
+        env.rpc_url.expect("rpc_url is required").as_str(),
+    ));
     let solana_rpc = Arc::new(GrpcGeyserImpl::new_with_rpc(
         env.grpc_url.clone().unwrap(),
         env.x_token.clone(),

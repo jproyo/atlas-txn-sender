@@ -10,7 +10,6 @@ use std::{
 use cadence_macros::statsd_time;
 use dashmap::DashMap;
 use indexmap::IndexMap;
-use solana_client::rpc_client::RpcClient;
 use solana_rpc_client_api::response::RpcContactInfo;
 use solana_sdk::slot_history::Slot;
 use tokio::time::sleep;
@@ -18,7 +17,7 @@ use tracing::{debug, error, info};
 
 use super::solana_rpc::SolanaRpc;
 use crate::errors::AtlasTxnSenderError;
-
+use solana_rpc_client::rpc_client::RpcClient;
 pub trait LeaderTracker: Send + Sync {
     /// get_leaders returns the next slot leaders in order
     fn get_leaders(&self) -> Vec<RpcContactInfo>;

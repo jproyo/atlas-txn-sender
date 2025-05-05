@@ -6,11 +6,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::Result;
 use cadence_macros::statsd_count;
 use dashmap::DashMap;
-use futures::sink::SinkExt;
-use futures::StreamExt;
+use futures::{SinkExt as _, StreamExt as _};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use solana_client::rpc_client::RpcClient;
+use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::clock::{Slot, UnixTimestamp};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;
@@ -106,21 +105,41 @@ impl GrpcGeyserImpl {
                 let mut grpc_tx;
                 let mut grpc_rx;
                 {
-                    let grpc_client = GeyserGrpcClient::connect::<String, String>(
+                    let mut geyser_client = match GeyserGrpcClient::build_from_shared(
                         endpoint.clone(),
-                        auth_header.clone(),
-                        None,
-                    );
-                    if let Err(e) = grpc_client {
-                        error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
-                        statsd_count!("grpc_connect_error", 1);
-                        sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    let subscription = grpc_client
-                        .unwrap()
+                    ) {
+                        Ok(geyser_client) => {
+                            let geyser_client = geyser_client.x_token(auth_header.clone());
+                            let geyser_client = match geyser_client {
+                                Ok(geyser_client) => geyser_client,
+                                Err(e) => {
+                                    error!("Error setting x-token: {}", e);
+                                    statsd_count!("grpc_x_token_error", 1);
+                                    sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            };
+                            match geyser_client.connect().await {
+                                Ok(geyser_client) => geyser_client,
+                                Err(e) => {
+                                    error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
+                                    statsd_count!("grpc_connect_error", 1);
+                                    sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
+                            statsd_count!("grpc_connect_error", 1);
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+                    let subscription = geyser_client
                         .subscribe_with_request(Some(get_block_subscribe_request()))
                         .await;
+
                     if let Err(e) = subscription {
                         error!("Error subscribing to gRPC stream, waiting one second then retrying connect: {}", e);
                         statsd_count!("grpc_subscribe_error", 1);
@@ -203,18 +222,38 @@ impl GrpcGeyserImpl {
                 let mut grpc_tx;
                 let mut grpc_rx;
                 {
-                    let grpc_client = GeyserGrpcClient::connect::<String, String>(
+                    let mut geyser_client = match GeyserGrpcClient::build_from_shared(
                         endpoint.clone(),
-                        auth_header.clone(),
-                        None,
-                    );
-                    if let Err(e) = grpc_client {
-                        error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
-                        statsd_count!("grpc_connect_error", 1);
-                        sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    let subscription = grpc_client.unwrap().subscribe().await;
+                    ) {
+                        Ok(geyser_client) => {
+                            let geyser_client = geyser_client.x_token(auth_header.clone());
+                            let geyser_client = match geyser_client {
+                                Ok(geyser_client) => geyser_client,
+                                Err(e) => {
+                                    error!("Error setting x-token: {}", e);
+                                    statsd_count!("grpc_x_token_error", 1);
+                                    sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            };
+                            match geyser_client.connect().await {
+                                Ok(geyser_client) => geyser_client,
+                                Err(e) => {
+                                    error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
+                                    statsd_count!("grpc_connect_error", 1);
+                                    sleep(Duration::from_secs(1)).await;
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error connecting to gRPC, waiting one second then retrying connect: {}", e);
+                            statsd_count!("grpc_connect_error", 1);
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+                    let subscription = geyser_client.subscribe().await;
                     if let Err(e) = subscription {
                         error!("Error subscribing to gRPC stream, waiting one second then retrying connect: {}", e);
                         statsd_count!("grpc_subscribe_error", 1);
