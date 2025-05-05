@@ -1,15 +1,24 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder, rpc_params};
+use serde::Deserialize;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
+    compute_budget::ComputeBudgetInstruction,
     signature::{Keypair, Signer},
     system_instruction,
     transaction::Transaction,
 };
 use std::{fs, path::PathBuf};
 use tracing::{error, info, Level};
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all(serialize = "camelCase", deserialize = "camelCase"))]
+pub struct BundleResponse {
+    pub signatures: Vec<String>,
+    pub errors: Vec<String>,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -187,26 +196,55 @@ async fn main() -> Result<()> {
             info!("From account: {}", from_keypair.pubkey());
             info!("To account: {}", to_keypair.pubkey());
 
+            // Create RPC client to get recent blockhash
+            let rpc_client = RpcClient::new_with_commitment(
+                args.solana_rpc_url.to_string(),
+                CommitmentConfig::confirmed(),
+            );
+
+            // Get rent-exempt minimum balance
+            let rent_exempt_balance = 890880; // Minimum balance for rent exemption (0.00089088 SOL)
+
             // Create HTTP client
             let client = HttpClientBuilder::default().build(url)?;
 
             // Create transactions
             let mut transactions = Vec::new();
             for _ in 0..count {
-                let transaction = Transaction::new_signed_with_payer(
-                    &[system_instruction::transfer(
+                // Get a new blockhash for each transaction
+                let recent_blockhash = rpc_client
+                    .get_latest_blockhash()
+                    .map_err(|e| anyhow::anyhow!("Failed to get recent blockhash: {}", e))?;
+
+                // Add compute budget instructions for prioritization fee
+                let compute_unit_price = 100_000; // Set a high priority fee (in micro-lamports)
+                let compute_unit_limit = 200_000; // Set compute unit limit
+
+                let instructions = vec![
+                    ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
+                    ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit),
+                    system_instruction::transfer(
                         &from_keypair.pubkey(),
                         &to_keypair.pubkey(),
-                        amount,
-                    )],
+                        amount + rent_exempt_balance, // Add rent-exempt balance to the transfer amount
+                    ),
+                ];
+
+                let transaction = Transaction::new_signed_with_payer(
+                    &instructions,
                     Some(&from_keypair.pubkey()),
                     &[&from_keypair],
-                    solana_sdk::hash::Hash::default(), // This will be replaced by the service
+                    recent_blockhash,
                 );
 
                 // Convert transaction to base58
                 let encoded = bs58::encode(bincode::serialize(&transaction)?).into_string();
                 transactions.push(encoded);
+
+                // Add a small delay between transactions to ensure different blockhashes
+                if count > 1 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
             }
 
             // Prepare request metadata
@@ -224,28 +262,21 @@ async fn main() -> Result<()> {
                 request_metadata
             );
 
-            let response: serde_json::Value = client
+            let response: BundleResponse = client
                 .request("sendTransactionBundle", params)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to send transaction bundle: {}", e))?;
 
-            // Extract signatures from response
-            let signatures = response
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("Expected array response"))?
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<String>>();
-
-            if signatures.is_empty() {
+            if response.signatures.is_empty() {
                 info!("No signatures returned from the service. This might indicate an error.");
-                if let Some(error) = response.get("error") {
-                    info!("Service error: {}", error);
+                if response.errors.is_empty() {
+                    error!("Failed to send transaction bundle {:?}", response);
+                } else {
+                    error!("Service errors: {:?}", response.errors);
                 }
-                error!("Failed to send transaction bundle {:?}", response);
             } else {
                 info!("Transaction bundle sent successfully!");
-                info!("Signatures: {:?}", signatures);
+                info!("Signatures: {:?}", response.signatures);
             }
         }
     }

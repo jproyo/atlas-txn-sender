@@ -1,8 +1,8 @@
-use anyhow::anyhow;
 use cadence_macros::{statsd_count, statsd_gauge, statsd_time};
 use dashmap::DashMap;
 use solana_client::{
     connection_cache::ConnectionCache, nonblocking::tpu_connection::TpuConnection,
+    rpc_client::RpcClient,
 };
 use solana_program_runtime::{
     compute_budget::ComputeBudget,
@@ -13,6 +13,7 @@ use solana_program_runtime::{
     prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
 };
 use solana_sdk::{clock::Slot, hash::Hash, transaction::VersionedTransaction};
+use solana_transaction_status::TransactionBinaryEncoding;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -25,7 +26,10 @@ use tonic::async_trait;
 use tracing::{debug, error, warn};
 
 use super::{leader_tracker::LeaderTracker, solana_rpc::SolanaRpc};
-use crate::storage::transaction_store::{get_signature, TransactionData, TransactionStore};
+use crate::{
+    storage::transaction_store::{get_signature, TransactionData, TransactionStore},
+    vendor::solana_rpc::send_and_encode_transaction,
+};
 use solana_sdk::borsh1::try_from_slice_unchecked;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 
@@ -37,11 +41,10 @@ const SEND_TXN_RETRIES: usize = 10;
 
 pub trait TxnSender: Send + Sync {
     fn send_transaction(&self, txn: TransactionData);
-    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64>;
-    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64>;
     fn send_transaction_bundle(
         &self,
         transactions: Vec<TransactionData>,
+        binary_encoding: TransactionBinaryEncoding,
         api_key: &str,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)>;
 }
@@ -76,6 +79,7 @@ pub struct TxnSenderImpl {
     solana_rpc: Arc<dyn SolanaRpc>,
     txn_sender_runtime: Arc<Runtime>,
     config: TxnSenderConfig,
+    rpc_client: Arc<RpcClient>,
 }
 
 impl TxnSenderImpl {
@@ -84,6 +88,7 @@ impl TxnSenderImpl {
         transaction_store: Arc<dyn TransactionStore>,
         connection_cache: Arc<ConnectionCache>,
         solana_rpc: Arc<dyn SolanaRpc>,
+        rpc_client: Arc<RpcClient>,
         config: TxnSenderConfig,
     ) -> Self {
         let txn_sender_runtime = Builder::new_multi_thread()
@@ -96,6 +101,7 @@ impl TxnSenderImpl {
             transaction_store,
             connection_cache,
             solana_rpc,
+            rpc_client,
             txn_sender_runtime: Arc::new(txn_sender_runtime),
             config,
         };
@@ -243,10 +249,6 @@ impl TxnSenderImpl {
             // Collect metrics
             // We separate the retry metrics to reduce the cardinality with API key and price.
             let landed = if confirmed_at.is_some() {
-                if let Some(block_time) = confirmed_at {
-                    debug!("Adding confirmed transaction: {} at block time {}", signature, block_time);
-                    transaction_store.add_confirmed_transaction(signature.clone(), block_time);
-                }
                 statsd_count!("transactions_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_landed_by_key", 1, "api_key" => &api_key);
                 statsd_time!("transaction_land_time", sent_at.elapsed(), "api_key" => &api_key, "priority_fees_enabled" => &priority_fees_enabled);
@@ -262,21 +264,6 @@ impl TxnSenderImpl {
             statsd_time!("transaction_priority_fee", fee, "landed" => &landed);
             statsd_time!("transaction_compute_limit", cu_limit as u64, "landed" => &landed);
         });
-    }
-
-    fn wait_for_confirmation(&self, signature: &str, api_key: &str) -> Option<i64> {
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(60) {
-            if let Some(block_time) = self.get_confirmed_transaction(signature) {
-                let block_time_str = block_time.to_string();
-                statsd_count!("confirmed_transaction_in_bundle", 1, "api_key" => api_key, "block" => &block_time_str);
-                debug!("Transaction confirmed: {:?}", signature);
-                self.remove_confirmed_transaction(signature);
-                return Some(block_time);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        None
     }
 }
 
@@ -395,68 +382,59 @@ impl TxnSender for TxnSenderImpl {
         }
     }
 
-    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64> {
-        self.transaction_store.get_confirmed_transaction(signature)
-    }
-
-    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64> {
-        self.transaction_store
-            .remove_confirmed_transaction(signature)
-    }
-
     fn send_transaction_bundle(
         &self,
         transactions: Vec<TransactionData>,
+        binary_encoding: TransactionBinaryEncoding,
         api_key: &str,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let mut signatures = Vec::new();
         let mut errors = Vec::new();
 
         // Process each transaction individually
-        for mut transaction in transactions {
-            // Get latest blockhash from cache
-            let latest_blockhash = self
+        for transaction in transactions {
+            // Get transaction's blockhash
+            let tx_blockhash = transaction.versioned_transaction.message.recent_blockhash();
+
+            // Check if blockhash is still valid
+            let is_valid = self
                 .config
                 .recent_blockhash_cache
                 .iter()
-                .max_by_key(|entry| *entry.value())
-                .map(|entry| *entry.key())
-                .unwrap_or_else(|| {
-                    warn!("No valid blockhash found in cache, using default");
-                    Hash::default()
-                });
+                .any(|entry| entry.key() == tx_blockhash);
 
-            // Update transaction with latest blockhash
-            transaction
-                .versioned_transaction
-                .message
-                .set_recent_blockhash(latest_blockhash);
+            if !is_valid {
+                warn!("Transaction has expired blockhash: {}", tx_blockhash);
+                errors.push(format!(
+                    "Transaction has expired blockhash: {}",
+                    tx_blockhash
+                ));
+                continue;
+            }
+
             let signature = transaction.versioned_transaction.signatures[0].to_string();
 
             debug!("Sending transaction: {}", signature);
-            self.send_transaction(transaction.clone());
-            debug!("Transaction sent: {:?}", signature);
-            statsd_count!("send_transaction_in_bundle", 1, "api_key" => api_key);
-
-            // Wait for confirmation
-            match self.wait_for_confirmation(&signature, api_key) {
-                Some(_) => {
+            match send_and_encode_transaction(
+                &self.rpc_client,
+                &transaction.versioned_transaction,
+                binary_encoding,
+                None,
+            ) {
+                Ok(signature) => {
+                    debug!("Transaction sent and confirmed: {:?}", signature);
+                    statsd_count!("send_transaction_in_bundle", 1, "api_key" => api_key);
                     signatures.push(signature.clone());
                 }
-                None => {
-                    statsd_count!("error_transaction_in_bundle", 1, "api_key" => api_key);
-                    warn!("Transaction not confirmed: {:?}", signature);
+                Err(e) => {
+                    warn!("Error sending transaction: {:?}", e);
                     errors.push(format!("Error processing transaction {:?}", signature));
+                    continue;
                 }
-            }
-            self.remove_confirmed_transaction(signature.as_str());
+            };
         }
 
-        if signatures.is_empty() {
-            Err(anyhow!("No transactions confirmed"))
-        } else {
-            Ok((signatures, errors))
-        }
+        Ok((signatures, errors))
     }
 }
 

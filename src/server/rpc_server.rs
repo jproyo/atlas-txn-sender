@@ -149,7 +149,7 @@ impl AtlasTxnSenderServer for AtlasTxnSenderImpl {
 
         let response = self
             .application
-            .send_transaction_bundle(transactions, request_metadata)
+            .send_transaction_bundle(transactions, request_metadata, binary_encoding)
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
         Ok(response)

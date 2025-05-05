@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let num_leaders = env.num_leaders.unwrap_or(2);
     let leader_offset = env.leader_offset.unwrap_or(0);
     let leader_tracker = Arc::new(LeaderTrackerImpl::new(
-        rpc_client,
+        rpc_client.clone(),
         solana_rpc.clone(),
         num_leaders,
         leader_offset,
@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         transaction_store.clone(),
         connection_cache,
         solana_rpc,
+        rpc_client.clone(),
         tx_sender_config,
     ));
     let max_txn_send_retries = env.max_txn_send_retries.unwrap_or(5);

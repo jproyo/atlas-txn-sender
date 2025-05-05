@@ -3,7 +3,6 @@ use std::{sync::Arc, time::Instant};
 use cadence_macros::statsd_time;
 use dashmap::DashMap;
 use solana_sdk::transaction::VersionedTransaction;
-use tracing::debug;
 use tracing::error;
 
 use crate::application::transaction::RequestMetadata;
@@ -24,21 +23,16 @@ pub trait TransactionStore: Send + Sync {
     fn remove_transaction(&self, signature: String) -> Option<TransactionData>;
     fn get_transactions(&self) -> Arc<DashMap<String, TransactionData>>;
     fn has_signature(&self, signature: &str) -> bool;
-    fn add_confirmed_transaction(&self, signature: String, block_time: i64);
-    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64>;
-    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64>;
 }
 
 pub struct TransactionStoreImpl {
     transactions: Arc<DashMap<String, TransactionData>>,
-    confirmed_transactions: Arc<DashMap<String, i64>>,
 }
 
 impl TransactionStoreImpl {
     pub fn new() -> Self {
         Self {
             transactions: Arc::new(DashMap::new()),
-            confirmed_transactions: Arc::new(DashMap::new()),
         }
     }
 }
@@ -83,23 +77,6 @@ impl TransactionStore for TransactionStoreImpl {
     }
     fn get_transactions(&self) -> Arc<DashMap<String, TransactionData>> {
         self.transactions.clone()
-    }
-    fn add_confirmed_transaction(&self, signature: String, block_time: i64) {
-        debug!(
-            "Adding confirmed transaction: {} at block time {}",
-            signature, block_time
-        );
-        self.confirmed_transactions.insert(signature, block_time);
-    }
-    fn get_confirmed_transaction(&self, signature: &str) -> Option<i64> {
-        self.confirmed_transactions
-            .get(signature)
-            .map(|v| *v.value())
-    }
-    fn remove_confirmed_transaction(&self, signature: &str) -> Option<i64> {
-        self.confirmed_transactions
-            .remove(signature)
-            .map(|(_, v)| v)
     }
 }
 

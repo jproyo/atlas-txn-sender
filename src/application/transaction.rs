@@ -1,5 +1,6 @@
 use cadence_macros::{statsd_count, statsd_time};
 use serde::{Deserialize, Serialize};
+use solana_transaction_status::TransactionBinaryEncoding;
 use std::sync::Arc;
 use tokio::time::Instant;
 use tonic::async_trait;
@@ -8,7 +9,6 @@ use tracing::info;
 use crate::errors::AtlasTxnSenderError;
 use crate::infrastructure::txn_sender::TxnSender;
 use crate::storage::transaction_store::{TransactionData, TransactionStore};
-
 pub struct AtlasTransactionApp {
     txn_sender: Arc<dyn TxnSender>,
     transaction_store: Arc<dyn TransactionStore>,
@@ -50,6 +50,7 @@ pub trait AtlasTransaction: Send + Sync {
         &self,
         transactions: Vec<TransactionData>,
         request_metadata: Option<RequestMetadata>,
+        binary_encoding: TransactionBinaryEncoding,
     ) -> Result<SendTransactionBundleResponse, AtlasTxnSenderError>;
 }
 
@@ -80,6 +81,7 @@ impl AtlasTransaction for AtlasTransactionApp {
         &self,
         transactions: Vec<TransactionData>,
         request_metadata: Option<RequestMetadata>,
+        binary_encoding: TransactionBinaryEncoding,
     ) -> Result<SendTransactionBundleResponse, AtlasTxnSenderError> {
         info!(
             "Sending transaction bundle: {:?}",
@@ -96,7 +98,7 @@ impl AtlasTransaction for AtlasTransactionApp {
         statsd_count!("send_transaction_bundle", 1, "api_key" => &api_key);
         let (signatures, errors) = self
             .txn_sender
-            .send_transaction_bundle(transactions, &api_key)
+            .send_transaction_bundle(transactions, binary_encoding, &api_key)
             .map_err(|e| AtlasTxnSenderError::Custom(e.to_string()))?;
 
         statsd_time!(
