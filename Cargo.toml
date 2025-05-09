@@ -2,6 +2,7 @@
 name = "atlas_txn_sender"
 version = "0.1.0"
 edition = "2021"
+default-run = "main"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -22,12 +23,12 @@ tracing-subscriber = { version = "0.3.16", features = [
   "ansi",
 ] }
 figment = { version = "0.10.6", features = ["env", "test"] }
-tonic = { version = "0.9.2", features = ["gzip", "tls", "tls-roots"] }
-solana-client = { version = "1.17.28" }
-solana-transaction-status = { version = "1.17.28" }
-solana-sdk = { version = "1.17.28" }
-solana-program-runtime = { version = "1.17.28" }
-solana-rpc-client-api = { version = "1.17.28" }
+tonic = { version = "0.13.0", features = ["gzip"] }
+solana-client = { version = "1.18.25" }
+solana-transaction-status = { version = "1.18.25" }
+solana-sdk = { version = "1.18.25" }
+solana-program-runtime = { version = "1.18.25" }
+solana-rpc-client-api = { version = "1.18.25" }
 cadence = "0.29.0"
 cadence-macros = "0.29.0"
 tower = { version = "0.4.13", features = ["full"] }
@@ -38,12 +39,15 @@ bincode = "1.3.3"
 crossbeam = "0.8.2"
 dashmap = "5.5.3"
 futures = "0.3.24"
-yellowstone-grpc-proto = { git = "https://github.com/helius-labs/yellowstone-grpc", tag = "v1.13.0+solana.1.17.28" }
-yellowstone-grpc-client = { git = "https://github.com/helius-labs/yellowstone-grpc", tag = "v1.13.0+solana.1.17.28" }
+yellowstone-grpc-proto = { git = "https://github.com/helius-labs/yellowstone-grpc", tag = "v1.15.3+solana.1.18.25" }
+yellowstone-grpc-client = { git = "https://github.com/helius-labs/yellowstone-grpc", tag = "v1.15.3+solana.1.18.25" }
 futures-channel = "0.3.30"
 futures-sink = "0.3.30"
 rand = "0.8.5"
 indexmap = "2.2.5"
+clap = { version = "4.4.18", features = ["derive"] }
+bs58 = "0.5.0"
+time = "0.3.40"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

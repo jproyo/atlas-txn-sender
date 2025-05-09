@@ -1,9 +1,19 @@
 use cadence_macros::{statsd_count, statsd_gauge, statsd_time};
+use dashmap::DashMap;
 use solana_client::{
     connection_cache::ConnectionCache, nonblocking::tpu_connection::TpuConnection,
+    rpc_client::RpcClient,
 };
-use solana_program_runtime::compute_budget::{ComputeBudget, MAX_COMPUTE_UNIT_LIMIT};
-use solana_sdk::transaction::VersionedTransaction;
+use solana_program_runtime::{
+    compute_budget::ComputeBudget,
+    compute_budget_processor::{
+        process_compute_budget_instructions, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
+        MAX_COMPUTE_UNIT_LIMIT,
+    },
+    prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
+};
+use solana_sdk::{clock::Slot, hash::Hash, transaction::VersionedTransaction};
+use solana_transaction_status::TransactionBinaryEncoding;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -13,15 +23,14 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tonic::async_trait;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
+use super::{leader_tracker::LeaderTracker, solana_rpc::SolanaRpc};
 use crate::{
-    leader_tracker::LeaderTracker,
-    solana_rpc::SolanaRpc,
-    transaction_store::{get_signature, TransactionData, TransactionStore},
+    storage::transaction_store::{get_signature, TransactionData, TransactionStore},
+    vendor::solana_rpc::send_and_encode_transaction,
 };
-use solana_program_runtime::compute_budget::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT;
-use solana_sdk::borsh0_10::try_from_slice_unchecked;
+use solana_sdk::borsh1::try_from_slice_unchecked;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 
 const RETRY_COUNT_BINS: [i32; 6] = [0, 1, 2, 5, 10, 25];
@@ -30,9 +39,37 @@ const MAX_TIMEOUT_SEND_DATA: Duration = Duration::from_millis(500);
 const MAX_TIMEOUT_SEND_DATA_BATCH: Duration = Duration::from_millis(500);
 const SEND_TXN_RETRIES: usize = 10;
 
-#[async_trait]
 pub trait TxnSender: Send + Sync {
     fn send_transaction(&self, txn: TransactionData);
+    fn send_transaction_bundle(
+        &self,
+        transactions: Vec<TransactionData>,
+        binary_encoding: TransactionBinaryEncoding,
+        api_key: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+}
+
+pub struct TxnSenderConfig {
+    txn_sender_threads: usize,
+    txn_send_retry_interval_seconds: usize,
+    max_retry_queue_size: Option<usize>,
+    recent_blockhash_cache: Arc<DashMap<Hash, Slot>>,
+}
+
+impl TxnSenderConfig {
+    pub fn new(
+        txn_sender_threads: usize,
+        txn_send_retry_interval_seconds: usize,
+        max_retry_queue_size: Option<usize>,
+        recent_blockhash_cache: Arc<DashMap<Hash, Slot>>,
+    ) -> Self {
+        Self {
+            txn_sender_threads,
+            txn_send_retry_interval_seconds,
+            max_retry_queue_size,
+            recent_blockhash_cache,
+        }
+    }
 }
 
 pub struct TxnSenderImpl {
@@ -41,8 +78,8 @@ pub struct TxnSenderImpl {
     connection_cache: Arc<ConnectionCache>,
     solana_rpc: Arc<dyn SolanaRpc>,
     txn_sender_runtime: Arc<Runtime>,
-    txn_send_retry_interval_seconds: usize,
-    max_retry_queue_size: Option<usize>,
+    config: TxnSenderConfig,
+    rpc_client: Arc<RpcClient>,
 }
 
 impl TxnSenderImpl {
@@ -51,12 +88,11 @@ impl TxnSenderImpl {
         transaction_store: Arc<dyn TransactionStore>,
         connection_cache: Arc<ConnectionCache>,
         solana_rpc: Arc<dyn SolanaRpc>,
-        txn_sender_threads: usize,
-        txn_send_retry_interval_seconds: usize,
-        max_retry_queue_size: Option<usize>,
+        rpc_client: Arc<RpcClient>,
+        config: TxnSenderConfig,
     ) -> Self {
         let txn_sender_runtime = Builder::new_multi_thread()
-            .worker_threads(txn_sender_threads)
+            .worker_threads(config.txn_sender_threads)
             .enable_all()
             .build()
             .unwrap();
@@ -65,9 +101,9 @@ impl TxnSenderImpl {
             transaction_store,
             connection_cache,
             solana_rpc,
+            rpc_client,
             txn_sender_runtime: Arc::new(txn_sender_runtime),
-            txn_send_retry_interval_seconds,
-            max_retry_queue_size,
+            config,
         };
         txn_sender.retry_transactions();
         txn_sender
@@ -78,8 +114,8 @@ impl TxnSenderImpl {
         let transaction_store = self.transaction_store.clone();
         let connection_cache = self.connection_cache.clone();
         let txn_sender_runtime = self.txn_sender_runtime.clone();
-        let txn_send_retry_interval_seconds = self.txn_send_retry_interval_seconds.clone();
-        let max_retry_queue_size = self.max_retry_queue_size.clone();
+        let txn_send_retry_interval_seconds = self.config.txn_send_retry_interval_seconds;
+        let max_retry_queue_size = self.config.max_retry_queue_size;
         tokio::spawn(async move {
             loop {
                 let mut transactions_reached_max_retries = vec![];
@@ -134,8 +170,7 @@ impl TxnSenderImpl {
                         txn_sender_runtime.spawn(async move {
                         // retry unless its a timeout
                         for i in 0..SEND_TXN_RETRIES {
-                            let conn = connection_cache 
-                                .get_nonblocking_connection(&leader.tpu_quic.unwrap());
+                            let conn = connection_cache.get_nonblocking_connection(&leader.tpu_quic.unwrap());
                             if let Ok(result) = timeout(MAX_TIMEOUT_SEND_DATA_BATCH, conn.send_data(&wire_transaction)).await {
                                 if let Err(e) = result {
                                     if i == SEND_TXN_RETRIES-1 {
@@ -175,8 +210,9 @@ impl TxnSenderImpl {
     }
 
     fn track_transaction(&self, transaction_data: &TransactionData) {
-        let sent_at = transaction_data.sent_at.clone();
+        let sent_at = transaction_data.sent_at;
         let signature = get_signature(transaction_data);
+        debug!("Tracking transaction: {:?}", signature.clone());
         if signature.is_none() {
             return;
         }
@@ -197,8 +233,9 @@ impl TxnSenderImpl {
             .map(|m| m.api_key.clone())
             .unwrap_or("none".to_string());
         self.txn_sender_runtime.spawn(async move {
+            debug!("Confirming transaction: {}", signature);
             let confirmed_at = solana_rpc.confirm_transaction(signature.clone()).await;
-            let transcation_data = transaction_store.remove_transaction(signature);
+            let transcation_data = transaction_store.remove_transaction(signature.clone());
             let mut retries = None;
             let mut max_retries = None;
             if let Some(transaction_data) = transcation_data {
@@ -206,17 +243,18 @@ impl TxnSenderImpl {
                 max_retries = Some(transaction_data.max_retries as i32);
             }
 
-            let retries_tag = bin_counter_to_tag(retries, &RETRY_COUNT_BINS.to_vec());
-            let max_retries_tag: String = bin_counter_to_tag(max_retries, &MAX_RETRIES_BINS.to_vec());
+            let retries_tag = bin_counter_to_tag(retries, RETRY_COUNT_BINS.as_ref());
+            let max_retries_tag: String = bin_counter_to_tag(max_retries, MAX_RETRIES_BINS.as_ref());
 
             // Collect metrics
             // We separate the retry metrics to reduce the cardinality with API key and price.
-            let landed = if let Some(_) = confirmed_at {
+            let landed = if confirmed_at.is_some() {
                 statsd_count!("transactions_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_landed_by_key", 1, "api_key" => &api_key);
                 statsd_time!("transaction_land_time", sent_at.elapsed(), "api_key" => &api_key, "priority_fees_enabled" => &priority_fees_enabled);
                 "true"
             } else {
+                debug!("Transaction not landed: {}", signature);
                 statsd_count!("transactions_not_landed", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
                 statsd_count!("transactions_not_landed_by_key", 1, "api_key" => &api_key);
                 statsd_count!("transactions_not_landed_retries", 1, "priority_fees_enabled" => &priority_fees_enabled, "retries" => &retries_tag, "max_retries_tag" => &max_retries_tag);
@@ -237,20 +275,13 @@ pub struct PriorityDetails {
 
 pub fn compute_priority_details(transaction: &VersionedTransaction) -> PriorityDetails {
     let mut cu_limit = DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT;
-    let mut compute_budget = ComputeBudget::new(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64);
-    if let Err(_e) = transaction.sanitize() {
-        return PriorityDetails {
-            fee: 0,
-            priority: 0,
-            cu_limit,
-        };
-    }
     let instructions = transaction.message.instructions().iter().map(|ix| {
         match try_from_slice_unchecked(&ix.data) {
             Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
                 cu_limit = compute_unit_limit.min(MAX_COMPUTE_UNIT_LIMIT);
             }
-            _ => {}
+            Ok(_) => {}
+            Err(_) => {}
         }
         (
             transaction
@@ -261,14 +292,38 @@ pub fn compute_priority_details(transaction: &VersionedTransaction) -> PriorityD
             ix,
         )
     });
-    let compute_budget = compute_budget.process_instructions(instructions, true, true);
-    match compute_budget {
-        Ok(compute_budget) => PriorityDetails {
-            fee: compute_budget.get_fee(),
-            priority: compute_budget.get_priority(),
-            cu_limit,
-        },
-        Err(_e) => PriorityDetails {
+    let compute_budget = ComputeBudget::try_from_instructions(instructions);
+    let instructions = transaction.message.instructions().iter().map(|ix| {
+        match try_from_slice_unchecked(&ix.data) {
+            Ok(ComputeBudgetInstruction::SetComputeUnitLimit(compute_unit_limit)) => {
+                cu_limit = compute_unit_limit.min(MAX_COMPUTE_UNIT_LIMIT);
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        (
+            transaction
+                .message
+                .static_account_keys()
+                .get(usize::from(ix.program_id_index))
+                .expect("program id index is sanitized"),
+            ix,
+        )
+    });
+    let compute_budget_limits = process_compute_budget_instructions(instructions);
+    match (compute_budget, compute_budget_limits) {
+        (Ok(compute_budget), Ok(compute_budget_limits)) => {
+            let priority_fee_type =
+                PrioritizationFeeType::ComputeUnitPrice(compute_budget_limits.compute_unit_price);
+            let fee =
+                PrioritizationFeeDetails::new(priority_fee_type, compute_budget.compute_unit_limit);
+            PriorityDetails {
+                fee: fee.get_fee(),
+                priority: fee.get_priority(),
+                cu_limit,
+            }
+        }
+        _ => PriorityDetails {
             fee: 0,
             priority: 0,
             cu_limit,
@@ -311,6 +366,7 @@ impl TxnSender for TxnSenderImpl {
                                 }
                         } else {
                             let leader_num_str = leader_num.to_string();
+                            debug!("Transaction received by leader: {:?}", leader_num_str);
                             statsd_time!(
                                 "transaction_received_by_leader",
                                 transaction_data.sent_at.elapsed(), "leader_num" => &leader_num_str, "api_key" => &api_key, "retry" => "false");
@@ -325,9 +381,64 @@ impl TxnSender for TxnSenderImpl {
             leader_num += 1;
         }
     }
+
+    fn send_transaction_bundle(
+        &self,
+        transactions: Vec<TransactionData>,
+        binary_encoding: TransactionBinaryEncoding,
+        api_key: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        let mut signatures = Vec::new();
+        let mut errors = Vec::new();
+
+        // Process each transaction individually
+        for transaction in transactions {
+            // Get transaction's blockhash
+            let tx_blockhash = transaction.versioned_transaction.message.recent_blockhash();
+
+            // Check if blockhash is still valid
+            let is_valid = self
+                .config
+                .recent_blockhash_cache
+                .iter()
+                .any(|entry| entry.key() == tx_blockhash);
+
+            if !is_valid {
+                warn!("Transaction has expired blockhash: {}", tx_blockhash);
+                errors.push(format!(
+                    "Transaction has expired blockhash: {}",
+                    tx_blockhash
+                ));
+                continue;
+            }
+
+            let signature = transaction.versioned_transaction.signatures[0].to_string();
+
+            debug!("Sending transaction: {}", signature);
+            match send_and_encode_transaction(
+                &self.rpc_client,
+                &transaction.versioned_transaction,
+                binary_encoding,
+                None,
+            ) {
+                Ok(signature) => {
+                    debug!("Transaction sent and confirmed: {:?}", signature);
+                    statsd_count!("send_transaction_in_bundle", 1, "api_key" => api_key);
+                    signatures.push(signature.clone());
+                }
+                Err(e) => {
+                    warn!("Error sending transaction: {:?}", e);
+                    errors.push(format!("Error processing transaction {:?}", signature));
+                    continue;
+                }
+            };
+        }
+
+        Ok((signatures, errors))
+    }
 }
 
-fn bin_counter_to_tag(counter: Option<i32>, bins: &Vec<i32>) -> String {
+fn bin_counter_to_tag(counter: Option<i32>, bins: &[i32]) -> String {
     if counter.is_none() {
         return "none".to_string();
     }

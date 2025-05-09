@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use jsonrpsee::types::error::INTERNAL_ERROR_CODE;
 use jsonrpsee::types::{error::INVALID_PARAMS_CODE, ErrorObjectOwned};
 
 pub fn invalid_request(reason: &str) -> ErrorObjectOwned {
@@ -28,5 +29,11 @@ impl std::fmt::Display for AtlasTxnSenderError {
 impl From<String> for AtlasTxnSenderError {
     fn from(msg: String) -> Self {
         AtlasTxnSenderError::Custom(msg)
+    }
+}
+
+impl From<AtlasTxnSenderError> for ErrorObjectOwned {
+    fn from(AtlasTxnSenderError::Custom(msg): AtlasTxnSenderError) -> Self {
+        ErrorObjectOwned::owned(INTERNAL_ERROR_CODE, msg, None::<String>)
     }
 }

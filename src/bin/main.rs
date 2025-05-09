@@ -1,31 +1,24 @@
-mod errors;
-mod grpc_geyser;
-mod leader_tracker;
-mod rpc_server;
-mod solana_rpc;
-mod transaction_store;
-mod txn_sender;
-mod vendor;
+use atlas_txn_sender::application::transaction::AtlasTransactionApp;
+use atlas_txn_sender::infrastructure::txn_sender::{TxnSenderConfig, TxnSenderImpl};
+use atlas_txn_sender::infrastructure::{
+    grpc_geyser::GrpcGeyserImpl, leader_tracker::LeaderTrackerImpl,
+};
+use atlas_txn_sender::metrics::new_metrics_client;
+use atlas_txn_sender::server::rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
+use atlas_txn_sender::storage::transaction_store::TransactionStoreImpl;
+use dashmap::DashMap;
+use figment::{providers::Env, Figment};
+use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
+use serde::Deserialize;
+use solana_client::connection_cache::ConnectionCache;
+use solana_client::rpc_client::RpcClient;
 
+use solana_sdk::signature::{read_keypair_file, Keypair};
 use std::{
     env,
-    net::{IpAddr, Ipv4Addr, UdpSocket},
+    net::{IpAddr, Ipv4Addr},
     sync::Arc,
 };
-
-use cadence::{BufferedUdpMetricSink, QueuingMetricSink, StatsdClient};
-use cadence_macros::set_global_default;
-use figment::{providers::Env, Figment};
-use grpc_geyser::GrpcGeyserImpl;
-use jsonrpsee::server::{middleware::ProxyGetRequestLayer, ServerBuilder};
-use leader_tracker::LeaderTrackerImpl;
-use rpc_server::{AtlasTxnSenderImpl, AtlasTxnSenderServer};
-use serde::Deserialize;
-use solana_client::{connection_cache::ConnectionCache, rpc_client::RpcClient};
-use solana_sdk::signature::{read_keypair_file, Keypair};
-use tracing::{error, info};
-use transaction_store::TransactionStoreImpl;
-use txn_sender::TxnSenderImpl;
 
 #[derive(Debug, Deserialize)]
 struct AtlasTxnSenderEnv {
@@ -56,9 +49,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 async fn main() -> anyhow::Result<()> {
     // Init metrics/logging
     let env: AtlasTxnSenderEnv = Figment::from(Env::raw()).extract().unwrap();
-    let env_filter = env::var("RUST_LOG")
-        .or::<Result<String, ()>>(Ok("info".to_string()))
-        .unwrap();
+    let env_filter = env::var("RUST_LOG").unwrap_or("info".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .json()
@@ -103,56 +94,44 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let transaction_store = Arc::new(TransactionStoreImpl::new());
-    let solana_rpc = Arc::new(GrpcGeyserImpl::new(
+    let blockhash_record = Arc::new(DashMap::new());
+    let rpc_client = Arc::new(RpcClient::new(
+        env.rpc_url.expect("rpc_url is required").as_str(),
+    ));
+    let solana_rpc = Arc::new(GrpcGeyserImpl::new_with_rpc(
         env.grpc_url.clone().unwrap(),
         env.x_token.clone(),
+        Some(blockhash_record.clone()),
+        &rpc_client,
     ));
-    let rpc_client = Arc::new(RpcClient::new(env.rpc_url.unwrap()));
+
     let num_leaders = env.num_leaders.unwrap_or(2);
     let leader_offset = env.leader_offset.unwrap_or(0);
     let leader_tracker = Arc::new(LeaderTrackerImpl::new(
-        rpc_client,
+        rpc_client.clone(),
         solana_rpc.clone(),
         num_leaders,
         leader_offset,
     ));
     let txn_send_retry_interval_seconds = env.txn_send_retry_interval.unwrap_or(2);
+    let tx_sender_config = TxnSenderConfig::new(
+        env.txn_sender_threads.unwrap_or(4),
+        txn_send_retry_interval_seconds,
+        env.max_retry_queue_size,
+        blockhash_record,
+    );
     let txn_sender = Arc::new(TxnSenderImpl::new(
         leader_tracker,
         transaction_store.clone(),
         connection_cache,
         solana_rpc,
-        env.txn_sender_threads.unwrap_or(4),
-        txn_send_retry_interval_seconds,
-        env.max_retry_queue_size,
+        rpc_client.clone(),
+        tx_sender_config,
     ));
     let max_txn_send_retries = env.max_txn_send_retries.unwrap_or(5);
-    let atlas_txn_sender =
-        AtlasTxnSenderImpl::new(txn_sender, transaction_store, max_txn_send_retries);
+    let atlas_txn_sender_app = Arc::new(AtlasTransactionApp::new(txn_sender, transaction_store));
+    let atlas_txn_sender = AtlasTxnSenderImpl::new(atlas_txn_sender_app, max_txn_send_retries);
     let handle = server.start(atlas_txn_sender.into_rpc());
     handle.stopped().await;
     Ok(())
-}
-
-fn new_metrics_client() {
-    let uri = env::var("METRICS_URI")
-        .or::<String>(Ok("127.0.0.1".to_string()))
-        .unwrap();
-    let port = env::var("METRICS_PORT")
-        .or::<String>(Ok("7998".to_string()))
-        .unwrap()
-        .parse::<u16>()
-        .unwrap();
-    info!("collecting metrics on: {}:{}", uri, port);
-    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-    socket.set_nonblocking(true).unwrap();
-
-    let host = (uri, port);
-    let udp_sink = BufferedUdpMetricSink::from(host, socket).unwrap();
-    let queuing_sink = QueuingMetricSink::from(udp_sink);
-    let builder = StatsdClient::builder("atlas_txn_sender", queuing_sink);
-    let client = builder
-        .with_error_handler(|e| error!("statsd metrics error: {}", e))
-        .build();
-    set_global_default(client);
 }
